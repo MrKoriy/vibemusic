@@ -4,21 +4,41 @@ public enum SessionMode: String, Codable, Sendable {
     case focus, meditate, sleep, wake
 }
 
+public enum TrackStatus: String, Codable, Sendable {
+    case live, vod, unknown
+}
+
+public enum TrackSource: String, Codable, Sendable {
+    case curated, user
+}
+
 public struct Track: Codable, Identifiable, Hashable, Sendable {
     public var id: String
     public var title: String
     public var channel: String?
     public var duration: Double?
+    public var liveFlag: Bool?
+    public var source: TrackSource
 
-    public init(id: String, title: String, channel: String? = nil, duration: Double? = nil) {
+    public init(id: String, title: String, channel: String? = nil, duration: Double? = nil, liveFlag: Bool? = nil, source: TrackSource = .user) {
         self.id = id
         self.title = title
         self.channel = channel
         self.duration = duration
+        self.liveFlag = liveFlag
+        self.source = source
     }
 
     public var url: URL { URL(string: "https://www.youtube.com/watch?v=" + id) ?? URL(fileURLWithPath: "/") }
-    public var isLive: Bool { duration == nil || duration == 0 }
+
+    public var status: TrackStatus {
+        if liveFlag == true { return .live }
+        if let d = duration, d > 0 { return .vod }
+        if source == .curated, duration == nil { return .live }
+        return .unknown
+    }
+
+    public var isLive: Bool { status == .live }
 
     public var durationLabel: String? {
         guard let d = duration, d > 0 else { return nil }
@@ -32,6 +52,9 @@ public struct Track: Codable, Identifiable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, title, channel, duration, uploader
+        case source
+        case isLive = "is_live"
+        case liveStatus = "live_status"
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,6 +71,14 @@ public struct Track: Codable, Identifiable, Hashable, Sendable {
         if let u = try? c.decodeIfPresent(String.self, forKey: .uploader), channel == nil {
             channel = u
         }
+        if let flag = try? c.decodeIfPresent(Bool.self, forKey: .isLive) {
+            liveFlag = flag
+        } else if let liveStatus = try? c.decodeIfPresent(String.self, forKey: .liveStatus), liveStatus == "is_live" {
+            liveFlag = true
+        } else {
+            liveFlag = nil
+        }
+        source = (try? c.decode(TrackSource.self, forKey: .source)) ?? .user
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -56,6 +87,8 @@ public struct Track: Codable, Identifiable, Hashable, Sendable {
         try c.encode(title, forKey: .title)
         try c.encodeIfPresent(channel, forKey: .channel)
         try c.encodeIfPresent(duration, forKey: .duration)
+        try c.encodeIfPresent(liveFlag, forKey: .isLive)
+        try c.encode(source, forKey: .source)
     }
 }
 
@@ -84,7 +117,11 @@ public struct MusicCategory: Codable, Identifiable, Sendable {
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         mode = (try? c.decode(SessionMode.self, forKey: .mode)) ?? .focus
         defaultMinutes = (try? c.decode(Int.self, forKey: .defaultMinutes)) ?? 25
-        tracks = (try? c.decode([Track].self, forKey: .tracks)) ?? []
+        var decodedTracks = (try? c.decode([Track].self, forKey: .tracks)) ?? []
+        for index in decodedTracks.indices {
+            decodedTracks[index].source = .curated
+        }
+        tracks = decodedTracks
     }
 }
 

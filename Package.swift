@@ -15,7 +15,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VibemusicTests",
-            dependencies: ["VibemusicCore"]
+            dependencies: ["VibemusicCore", "Vibemusic"]
         ),
     ]
 )

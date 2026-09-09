@@ -6,12 +6,36 @@ public final class LibraryStore: ObservableObject {
     @Published public var userTracks: [Track] {
         didSet { persistUserTracks() }
     }
+    @Published public private(set) var lastLoadError: String?
 
     public static let myCategoryID = "my"
 
-    public init() {
+    private let directory: URL
+
+    public init(directory: URL? = nil) {
+        let resolved: URL
+        if let directory {
+            resolved = directory
+        } else {
+            let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            resolved = base.appendingPathComponent("Vibemusic", isDirectory: true)
+        }
+        try? FileManager.default.createDirectory(at: resolved, withIntermediateDirectories: true)
+        let userFile = resolved.appendingPathComponent("user_tracks.json")
+
         curated = Self.loadCurated()
-        userTracks = Self.loadUserTracks()
+        userTracks = []
+        lastLoadError = nil
+        self.directory = resolved
+
+        switch PersistenceUtil.load([Track].self, from: userFile) {
+        case .loaded(let tracks):
+            userTracks = tracks
+        case .missing:
+            break
+        case .corrupted:
+            lastLoadError = "Файл пользовательских треков повреждён; создана резервная копия"
+        }
     }
 
     private static func loadCurated() -> [MusicCategory] {
@@ -21,22 +45,14 @@ public final class LibraryStore: ObservableObject {
         return doc.categories
     }
 
-    private static var userFileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = base.appendingPathComponent("Vibemusic", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("user_tracks.json")
-    }
-
-    private static func loadUserTracks() -> [Track] {
-        guard let data = try? Data(contentsOf: userFileURL),
-              let tracks = try? JSONDecoder().decode([Track].self, from: data) else { return [] }
-        return tracks
+    private var userFileURL: URL {
+        directory.appendingPathComponent("user_tracks.json")
     }
 
     private func persistUserTracks() {
-        guard let data = try? JSONEncoder().encode(userTracks) else { return }
-        try? data.write(to: Self.userFileURL, options: .atomic)
+        guard let data = try? JSONEncoder().encode(userTracks),
+              (try? data.write(to: userFileURL, options: .atomic)) != nil else { return }
+        lastLoadError = nil
     }
 
     public var userCategory: MusicCategory {
@@ -50,8 +66,14 @@ public final class LibraryStore: ObservableObject {
     }
 
     public func addUserTracks(_ tracks: [Track]) {
-        let existing = Set(userTracks.map(\.id))
-        userTracks.append(contentsOf: tracks.filter { !existing.contains($0.id) })
+        var seen = Set(userTracks.map(\.id))
+        var unique: [Track] = []
+        for track in tracks where !seen.contains(track.id) {
+            seen.insert(track.id)
+            unique.append(track)
+        }
+        guard !unique.isEmpty else { return }
+        userTracks.append(contentsOf: unique)
     }
 
     public func removeUserTrack(id: String) {

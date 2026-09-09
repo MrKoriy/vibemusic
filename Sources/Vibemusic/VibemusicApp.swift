@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct VibemusicApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @AppStorage("menuBarEnabled") private var menuBarEnabled = true
+    @AppStorage(AppDefaults.Keys.menuBarEnabled) private var menuBarEnabled = AppDefaults.menuBarEnabled
 
     @StateObject private var store: LibraryStore
     @StateObject private var stats: StatsStore
@@ -28,6 +28,14 @@ struct VibemusicApp: App {
 
     init() {
         CLIBootstrap.handleIfNeeded()
+        // Разовая миграция со старого ключа "menuBarEnabled" (C-6): если
+        // нового ключа нет, а легаси-значение записано — переносим.
+        _ = AppDefaults.migratedValue(
+            UserDefaults.standard,
+            newKey: AppDefaults.Keys.menuBarEnabled,
+            legacyKey: AppDefaults.Keys.Legacy.menuBarEnabled,
+            fallback: AppDefaults.menuBarEnabled
+        )
         let store = LibraryStore()
         let stats = StatsStore()
         let player = PlayerCore()

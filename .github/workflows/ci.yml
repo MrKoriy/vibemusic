@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    name: Tests, release build, library lint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-
+
+      - name: Run tests
+        run: swift test
+
+      - name: Release build
+        run: swift build -c release
+
+      - name: Lint Info.plist
+        run: plutil -lint App/Info.plist
+
+      - name: Validate library.json
+        run: python3 Scripts/validate_library.py
+
+  bundle-smoke:
+    name: make app smoke (optional)
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-
+
+      - name: Cache yt-dlp binary
+        uses: actions/cache@v4
+        with:
+          path: build/yt-dlp
+          key: ytdlp-${{ hashFiles('Scripts/yt-dlp.version') }}
+
+      - name: Bundle app
+        run: make app

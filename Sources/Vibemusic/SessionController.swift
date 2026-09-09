@@ -12,11 +12,11 @@ final class SessionController: ObservableObject {
 
     @Published private(set) var selectedCategoryID: String?
     @Published private(set) var isWaitingForStream = false
-    @Published var shuffle: Bool { didSet { defaults.set(shuffle, forKey: Keys.shuffle) } }
-    @Published var volume: Float { didSet { player.setVolume(volume); defaults.set(volume, forKey: Keys.volume) } }
-    @Published var sessionMinutes: Int { didSet { defaults.set(sessionMinutes, forKey: Keys.sessionMinutes) } }
-    @Published var timerModeRaw: String { didSet { defaults.set(timerModeRaw, forKey: Keys.timerMode) } }
-    @Published var breakMinutes: Int { didSet { defaults.set(breakMinutes, forKey: Keys.breakMinutes) } }
+    @Published var shuffle: Bool { didSet { defaults.set(shuffle, forKey: AppDefaults.Keys.shuffle) } }
+    @Published var volume: Float { didSet { player.setVolume(volume); defaults.set(volume, forKey: AppDefaults.Keys.volume) } }
+    @Published var sessionMinutes: Int { didSet { defaults.set(sessionMinutes, forKey: AppDefaults.Keys.sessionMinutes) } }
+    @Published var timerModeRaw: String { didSet { defaults.set(timerModeRaw, forKey: AppDefaults.Keys.timerMode) } }
+    @Published var breakMinutes: Int { didSet { defaults.set(breakMinutes, forKey: AppDefaults.Keys.breakMinutes) } }
 
     var timerMode: TimerEngine.Mode { TimerEngine.Mode(rawValue: timerModeRaw) ?? .countdown }
 
@@ -24,32 +24,28 @@ final class SessionController: ObservableObject {
         let minutes: Int
         let mode: TimerEngine.Mode
         let breakMinutes: Int
+        let sessionMode: SessionMode
     }
 
     private var pending: PendingStart?
+    private var activeSessionMode: SessionMode?
     private var fallbackTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
-    private enum Keys {
-        static let sessionMinutes = "sessionMinutes"
-        static let timerMode = "timerMode"
-        static let breakMinutes = "breakMinutes"
-        static let shuffle = "shuffle"
-        static let volume = "volume"
-    }
-
-    init(store: LibraryStore, player: PlayerCore, timer: TimerEngine, stats: StatsStore) {
+    init(store: LibraryStore, player: PlayerCore, timer: TimerEngine, stats: StatsStore,
+         defaults: UserDefaults = .standard, warmupEnabled: Bool = true) {
         self.store = store
         self.player = player
         self.timer = timer
         self.stats = stats
+        self.defaults = defaults
 
-        shuffle = defaults.object(forKey: Keys.shuffle) as? Bool ?? true
-        volume = defaults.object(forKey: Keys.volume) as? Float ?? 0.85
-        sessionMinutes = defaults.object(forKey: Keys.sessionMinutes) as? Int ?? 50
-        timerModeRaw = defaults.string(forKey: Keys.timerMode) ?? "pomodoro"
-        breakMinutes = defaults.object(forKey: Keys.breakMinutes) as? Int ?? 5
+        shuffle = AppDefaults.migratedValue(defaults, newKey: AppDefaults.Keys.shuffle, legacyKey: AppDefaults.Keys.Legacy.shuffle, fallback: AppDefaults.shuffle)
+        volume = AppDefaults.migratedValue(defaults, newKey: AppDefaults.Keys.volume, legacyKey: AppDefaults.Keys.Legacy.volume, fallback: AppDefaults.volume)
+        sessionMinutes = AppDefaults.migratedValue(defaults, newKey: AppDefaults.Keys.sessionMinutes, legacyKey: AppDefaults.Keys.Legacy.sessionMinutes, fallback: AppDefaults.sessionMinutes)
+        timerModeRaw = AppDefaults.migratedValue(defaults, newKey: AppDefaults.Keys.timerMode, legacyKey: AppDefaults.Keys.Legacy.timerMode, fallback: AppDefaults.timerModeRaw)
+        breakMinutes = AppDefaults.migratedValue(defaults, newKey: AppDefaults.Keys.breakMinutes, legacyKey: AppDefaults.Keys.Legacy.breakMinutes, fallback: AppDefaults.breakMinutes)
 
         timer.bell = {
             if let sound = NSSound(named: "Glass") ?? NSSound(named: "Ping") {
@@ -63,7 +59,7 @@ final class SessionController: ObservableObject {
         }
         timer.onWorkPhaseCompleted = { [weak self] minutes in
             guard let self, minutes > 0 else { return }
-            self.stats.record(minutes: minutes, mode: self.selectedCategory?.mode ?? .focus)
+            self.stats.record(minutes: minutes, mode: self.sessionModeForStats)
         }
 
         player.$isPlaying
@@ -74,13 +70,19 @@ final class SessionController: ObservableObject {
             .store(in: &cancellables)
 
         player.setVolume(volume)
-        if let firstCat = store.category(id: "work") ?? store.curated.first {
+        if warmupEnabled, let firstCat = store.category(id: "work") ?? store.curated.first {
             player.warmup(category: firstCat)
         }
     }
 
     var selectedCategory: MusicCategory? {
         selectedCategoryID.flatMap { store.category(id: $0) }
+    }
+
+    /// Режим для статистики: категория, в которой сессия была СТАРТОВАНА
+    /// (аудит A-6), а не текущая выбранная.
+    private var sessionModeForStats: SessionMode {
+        activeSessionMode ?? selectedCategory?.mode ?? .focus
     }
 
     func select(_ category: MusicCategory) {
@@ -96,7 +98,7 @@ final class SessionController: ObservableObject {
         selectedCategoryID = category.id
         let minutes = category.defaultMinutes
         sessionMinutes = minutes
-        pending = PendingStart(minutes: minutes, mode: timerMode, breakMinutes: breakMinutes)
+        pending = PendingStart(minutes: minutes, mode: timerMode, breakMinutes: breakMinutes, sessionMode: category.mode)
         isWaitingForStream = true
         player.play(category: category, shuffle: shuffle)
         fallbackTask?.cancel()
@@ -121,16 +123,30 @@ final class SessionController: ObservableObject {
         recordPartialWork()
         pending = nil
         isWaitingForStream = false
+        activeSessionMode = nil
         fallbackTask?.cancel()
         fallbackTask = nil
         timer.reset()
-        player.stop(fade: false)
+        // Полная остановка: отменяет резолвы/stall/autoNext/fade —
+        // воскрешение воспроизведения после сброса невозможно (аудит A-2).
+        player.reset()
     }
 
     func setDuration(_ minutes: Int) {
+        // Аудит A-5: во время перерыва НЕ обрываем его — новая длительность
+        // только сохраняется (sessionMinutes → UserDefaults). Текущий перерыв
+        // и следующая за ним work-фаза идут с параметрами, захваченными при
+        // старте сессии: TimerEngine хранит их до следующего start и не
+        // допускает точечной подмены workSeconds. Актуальное значение
+        // гарантированно применяется при следующем полном рестарте
+        // (setMode / новая сессия): timer.start получает текущий sessionMinutes.
+        if timer.phase == .breakPhase {
+            sessionMinutes = minutes
+            return
+        }
         recordPartialWork()
         sessionMinutes = minutes
-        if timer.phase == .work || timer.phase == .breakPhase {
+        if timer.phase == .work {
             timer.start(minutes: minutes, mode: timerMode, breakMinutes: breakMinutes)
         }
     }
@@ -138,8 +154,15 @@ final class SessionController: ObservableObject {
     func setMode(_ mode: TimerEngine.Mode) {
         timerModeRaw = mode.rawValue
         if timer.phase == .work || timer.phase == .breakPhase {
+            recordPartialWork()
             timer.start(minutes: sessionMinutes, mode: mode, breakMinutes: breakMinutes)
         }
+    }
+
+    /// Вся запись статистики идёт через контроллер (колбэк onWorkPhaseCompleted),
+    /// поэтому пропуск фазы UI должен звать сюда, а не в таймер напрямую.
+    func skipPhase() {
+        timer.skipPhase()
     }
 
     func setVolume(_ value: Float) {
@@ -154,10 +177,11 @@ final class SessionController: ObservableObject {
         }
     }
 
-    private func beginTimerWhenReady() {
+    func beginTimerWhenReady() {
         guard let start = pending else { return }
         pending = nil
         isWaitingForStream = false
+        activeSessionMode = start.sessionMode
         fallbackTask?.cancel()
         fallbackTask = nil
         timer.start(minutes: start.minutes, mode: start.mode, breakMinutes: start.breakMinutes)
@@ -167,7 +191,7 @@ final class SessionController: ObservableObject {
         guard timer.phase == .work else { return }
         let elapsedMinutes = Int((timer.total - timer.remaining) / 60)
         if elapsedMinutes >= 1 {
-            stats.record(minutes: elapsedMinutes, mode: selectedCategory?.mode ?? .focus)
+            stats.record(minutes: elapsedMinutes, mode: sessionModeForStats)
         }
     }
 }

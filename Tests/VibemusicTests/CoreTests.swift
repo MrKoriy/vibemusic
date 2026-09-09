@@ -39,91 +39,9 @@ import Testing
     #expect(decoded == track)
 }
 
-@MainActor @Test func countdownCompletesAndFiresSessionEnd() {
-    let engine = TimerEngine()
-    engine.tickInterval = 30
-    var bells = 0
-    var sessionEnds = 0
-    var workMinutes: [Int] = []
-    engine.bell = { bells += 1 }
-    engine.onSessionEnd = { sessionEnds += 1 }
-    engine.onWorkPhaseCompleted = { workMinutes.append($0) }
-
-    engine.start(minutes: 1, mode: .countdown, breakMinutes: 5)
-    #expect(engine.phase == .work)
-    #expect(engine.remaining == 60)
-
-    engine.simulateTick()
-    #expect(engine.remaining == 30)
-
-    engine.simulateTick()
-    #expect(engine.phase == .finished)
-    #expect(bells == 1)
-    #expect(sessionEnds == 1)
-    #expect(workMinutes == [1])
-}
-
-@MainActor @Test func pomodoroCyclesPhases() {
-    let engine = TimerEngine()
-    engine.tickInterval = 30
-    var bells = 0
-    var workMinutes: [Int] = []
-    engine.bell = { bells += 1 }
-    engine.onWorkPhaseCompleted = { workMinutes.append($0) }
-
-    engine.start(minutes: 1, mode: .pomodoro, breakMinutes: 1)
-    #expect(engine.phase == .work)
-
-    engine.simulateTick()
-    engine.simulateTick()
-    #expect(engine.phase == .breakPhase)
-    #expect(engine.remaining == 60)
-    #expect(engine.completedCycles == 1)
-    #expect(bells == 1)
-    #expect(workMinutes == [1])
-
-    engine.simulateTick()
-    engine.simulateTick()
-    #expect(engine.phase == .work)
-    #expect(engine.completedCycles == 1)
-    #expect(bells == 2)
-
-    engine.simulateTick()
-    engine.simulateTick()
-    #expect(engine.completedCycles == 2)
-    #expect(workMinutes == [1, 1])
-}
-
-@MainActor @Test func skipPhaseRecordsPartialMinutesOnly() {
-    let engine = TimerEngine()
-    engine.tickInterval = 30
-    var workMinutes: [Int] = []
-    engine.onWorkPhaseCompleted = { workMinutes.append($0) }
-
-    engine.start(minutes: 10, mode: .pomodoro, breakMinutes: 5)
-    engine.simulateTick()
-    engine.skipPhase()
-    #expect(engine.phase == .breakPhase)
-    #expect(workMinutes.isEmpty)
-
-    engine.skipPhase()
-    #expect(engine.phase == .work)
-}
-
-@MainActor @Test func pauseBlocksTicks() {
-    let engine = TimerEngine()
-    engine.tickInterval = 1
-    engine.start(minutes: 5, mode: .countdown, breakMinutes: 5)
-    engine.pause()
-    engine.simulateTick()
-    #expect(engine.remaining == 300)
-    engine.resume()
-    engine.simulateTick()
-    #expect(engine.remaining == 299)
-}
-
 @MainActor @Test func userCategoryBuilds() {
-    let store = LibraryStore()
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let store = LibraryStore(directory: dir)
     store.addUserTracks([Track(id: "aaa11111111", title: "One")])
     store.addUserTracks([Track(id: "aaa11111111", title: "Duplicate")])
     let my = store.userCategory

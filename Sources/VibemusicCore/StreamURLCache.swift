@@ -7,6 +7,7 @@ public final class StreamURLCache: @unchecked Sendable {
         let urlString: String
         let viaProxy: Bool
         let expiresAt: TimeInterval
+        let proxyFingerprint: String?
 
         var isValid: Bool {
             expiresAt > Date().timeIntervalSince1970 + 600
@@ -43,9 +44,34 @@ public final class StreamURLCache: @unchecked Sendable {
         return nil
     }
 
-    public func set(videoID: String, url: URL, viaProxy: Bool) {
+    /// Получение записи с проверкой маршрута: ссылка googlevideo привязана к IP,
+    /// поэтому при несовпадении отпечатка прокси запись считается протухшей —
+    /// возвращается nil, а запись удаляется.
+    public func get(videoID: String, route fingerprint: String?) -> (url: URL, viaProxy: Bool)? {
+        var hit: (url: URL, viaProxy: Bool)?
+        var removed = false
+        lock.lock()
+        if let entry = entries[videoID] {
+            if entry.isValid, let url = entry.url, entry.proxyFingerprint == fingerprint {
+                hit = (url, entry.viaProxy)
+            } else {
+                entries.removeValue(forKey: videoID)
+                removed = true
+            }
+        }
+        lock.unlock()
+        if removed { saveAsync() }
+        return hit
+    }
+
+    public func set(videoID: String, url: URL, viaProxy: Bool, fingerprint: String? = nil) {
         let expiry = Self.parseExpiry(from: url) ?? (Date().timeIntervalSince1970 + 14400)
-        let entry = Entry(urlString: url.absoluteString, viaProxy: viaProxy, expiresAt: expiry)
+        let entry = Entry(
+            urlString: url.absoluteString,
+            viaProxy: viaProxy,
+            expiresAt: expiry,
+            proxyFingerprint: fingerprint
+        )
 
         lock.lock()
         entries[videoID] = entry
@@ -68,12 +94,19 @@ public final class StreamURLCache: @unchecked Sendable {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) else { return }
-        lock.lock()
-        let now = Date().timeIntervalSince1970
-        entries = decoded.filter { $0.value.expiresAt > now + 600 }
-        lock.unlock()
+        // Битый JSON не затираем молча: PersistenceUtil уводит файл в бэкап
+        // .corrupt-*, кэш стартует пустым (аудит C-4).
+        switch PersistenceUtil.load([String: Entry].self, from: fileURL) {
+        case .loaded(let decoded):
+            lock.lock()
+            let now = Date().timeIntervalSince1970
+            entries = decoded.filter { $0.value.expiresAt > now + 600 }
+            lock.unlock()
+        case .missing, .corrupted:
+            lock.lock()
+            entries = [:]
+            lock.unlock()
+        }
     }
 
     private func snapshotData() -> Data? {

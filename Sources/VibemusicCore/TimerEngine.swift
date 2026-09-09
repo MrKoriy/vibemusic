@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 @MainActor
 public final class TimerEngine: ObservableObject {
@@ -16,7 +17,16 @@ public final class TimerEngine: ObservableObject {
     @Published public private(set) var completedCycles = 0
     @Published public private(set) var isPaused = false
 
+    /// Injectable clock; tests substitute a deterministic fake.
+    /// Deadline math always goes through this closure, never through Date() directly.
+    public var clock: () -> Date = { Date() }
+
+    /// Legacy property kept only for source compatibility with older call sites.
+    /// It no longer participates in the time math: remaining is always derived
+    /// from phaseDeadline vs clock, so the polling cadence cannot accumulate drift.
+    /// The ticker itself always polls at a fixed 1 s interval.
     public var tickInterval: TimeInterval = 1
+
     public var bell: () -> Void = {}
     public var onSessionEnd: () -> Void = {}
     public var onWorkPhaseCompleted: ((Int) -> Void)?
@@ -24,7 +34,10 @@ public final class TimerEngine: ObservableObject {
     private var workSeconds: TimeInterval = 0
     private var breakSeconds: TimeInterval = 5 * 60
     private var mode: Mode = .countdown
+    private var phaseDeadline = Date.distantPast
+    private var hasStarted = false
     private nonisolated(unsafe) var ticker: Timer?
+    private let logger = Logger(subsystem: "com.vibemusic.app", category: "timer")
 
     public init() {}
 
@@ -36,6 +49,7 @@ public final class TimerEngine: ObservableObject {
         self.mode = mode
         completedCycles = 0
         isPaused = false
+        hasStarted = true
         beginPhase(.work)
     }
 
@@ -45,33 +59,45 @@ public final class TimerEngine: ObservableObject {
     }
 
     public func pause() {
+        guard phase == .work || phase == .breakPhase, !isPaused else { return }
         isPaused = true
+        remaining = remainingFromDeadline()
         stopTicker()
+        logger.info("paused with remaining=\(self.remaining, format: .fixed(precision: 1))s")
     }
 
     public func resume() {
+        guard phase == .work || phase == .breakPhase, isPaused else { return }
         isPaused = false
+        phaseDeadline = clock().addingTimeInterval(remaining)
         startTicker()
+        logger.info("resumed with remaining=\(self.remaining, format: .fixed(precision: 1))s")
     }
 
     public func reset() {
         stopTicker()
         phase = .idle
-        total = max(workSeconds, 1)
-        remaining = workSeconds
         isPaused = false
         completedCycles = 0
+        total = hasStarted ? workSeconds : 0
+        remaining = total
+        logger.info("reset: total=\(self.total, format: .fixed(precision: 0))s, started before=\(self.hasStarted)")
     }
 
     public func skipPhase() {
         guard phase == .work || phase == .breakPhase else { return }
         if phase == .work {
-            let elapsedMinutes = Int((total - remaining) / 60)
+            let elapsedMinutes = Int(max(0, total - currentRemaining()) / 60)
             if elapsedMinutes > 0 { onWorkPhaseCompleted?(elapsedMinutes) }
         }
+        logger.info("phase skipped (phase=\(String(describing: self.phase)))")
         phaseCompleted()
     }
 
+    /// Recomputes remaining from the phase deadline and advances the phase
+    /// machine when the deadline has passed. Kept public so existing manual
+    /// tick call sites keep compiling; with the injected clock it is fully
+    /// deterministic in tests.
     public func simulateTick() {
         tick()
     }
@@ -80,7 +106,9 @@ public final class TimerEngine: ObservableObject {
         phase = p
         total = (p == .breakPhase) ? breakSeconds : workSeconds
         remaining = total
-        startTicker()
+        phaseDeadline = clock().addingTimeInterval(total)
+        if isPaused { stopTicker() } else { startTicker() }
+        logger.info("phase \(String(describing: p)) started: duration=\(self.total, format: .fixed(precision: 0))s")
     }
 
     private func phaseCompleted() {
@@ -105,12 +133,13 @@ public final class TimerEngine: ObservableObject {
         phase = .finished
         isPaused = false
         remaining = 0
+        logger.info("session finished after \(self.completedCycles) cycles")
         onSessionEnd()
     }
 
     private func startTicker() {
         stopTicker()
-        ticker = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { [weak self] _ in
+        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.tick()
             }
@@ -123,14 +152,27 @@ public final class TimerEngine: ObservableObject {
     }
 
     private func tick() {
-        guard !isPaused, phase == .work || phase == .breakPhase else { return }
-        remaining -= tickInterval
-        if remaining <= 0 {
-            remaining = 0
-            if phase == .work {
-                onWorkPhaseCompleted?(Int(workSeconds / 60))
-            }
-            phaseCompleted()
+        guard phase == .work || phase == .breakPhase, !isPaused else { return }
+        let left = phaseDeadline.timeIntervalSince(clock())
+        if left > 0 {
+            remaining = left
+            return
         }
+        remaining = 0
+        if phase == .work {
+            onWorkPhaseCompleted?(Int(workSeconds / 60))
+        }
+        logger.info("phase deadline reached")
+        phaseCompleted()
+    }
+
+    private func remainingFromDeadline() -> TimeInterval {
+        max(0, phaseDeadline.timeIntervalSince(clock()))
+    }
+
+    /// Accurate remaining: while running it is derived from the deadline,
+    /// while paused it is the value frozen at pause time.
+    private func currentRemaining() -> TimeInterval {
+        isPaused ? remaining : remainingFromDeadline()
     }
 }

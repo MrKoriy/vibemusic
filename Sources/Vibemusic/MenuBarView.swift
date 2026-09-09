@@ -6,7 +6,7 @@ struct MenuBarLabel: View {
 
     var body: some View {
         if timer.phase == .work || timer.phase == .breakPhase {
-            Text(Theme.timeString(timer.remaining))
+            Text((timer.isPaused ? "⏸ " : "") + Theme.timeString(timer.remaining))
                 .monospacedDigit()
         } else {
             Image(systemName: "waveform")
@@ -53,7 +53,13 @@ struct MenuBarView: View {
     }
 
     private var phaseLabel: String {
-        timer.phase == .breakPhase ? "Перерыв" : "Фокус"
+        if timer.phase == .breakPhase { return "Перерыв" }
+        switch controller.selectedCategory?.mode {
+        case .meditate: return "Медитация"
+        case .sleep: return "Сон"
+        case .wake: return "Утро"
+        default: return "Фокус"
+        }
     }
 
     private func openSettings() {

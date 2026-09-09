@@ -11,6 +11,8 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var isAdding = false
+    @State private var textFieldFocused = false
+    @State private var didShowLoadDiagnostics = false
 
     private var selectedCategory: MusicCategory? { controller.selectedCategory }
     private var tint: Color {
@@ -45,9 +47,6 @@ struct ContentView: View {
         selectedCategory?.title ?? "Выберите режим"
     }
 
-    private var presetMinutes: [Int] { [15, 30, 60, 120] }
-    private var menuMinutes: [Int] { [5, 10, 15, 20, 25, 30, 45, 50, 60, 90, 120, 180, 240, 480] }
-
     var body: some View {
         ZStack {
             AmbientBackground(tint: tint)
@@ -76,7 +75,7 @@ struct ContentView: View {
                         durationRow
                         categoriesGrid
                         todayFooter
-                        PlayerBar(player: player, volume: volumeBinding)
+                        PlayerBar(player: player, controller: controller, volume: volumeBinding)
                     }
                     .padding(.horizontal, 30)
                     .padding(.top, 16)
@@ -102,6 +101,25 @@ struct ContentView: View {
                 delegate.openMain = { openWindow(id: "main") }
             }
             NowPlayingManager.shared.activate(player: player, controller: controller)
+            reportBrokenDataIfNeeded()
+        }
+        .onReceive(
+            NotificationCenter.default
+                .publisher(for: NSApplication.didUpdateNotification)
+                .receive(on: RunLoop.main)
+        ) { _ in
+            MainActor.assumeIsolated {
+                let responder = NSApp.keyWindow?.firstResponder
+                textFieldFocused = responder is NSTextView || responder is NSTextField
+            }
+        }
+    }
+
+    private func reportBrokenDataIfNeeded() {
+        guard !didShowLoadDiagnostics else { return }
+        didShowLoadDiagnostics = true
+        if let message = store.lastLoadError ?? stats.lastLoadError {
+            player.statusText = message
         }
     }
 
@@ -143,6 +161,8 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .glassCircle(diameter: 36)
                 .help("Перемешивание треков")
+                .accessibilityLabel("Перемешивание треков")
+                .accessibilityHint("Включает и выключает случайный порядок воспроизведения")
 
                 Button {
                     isAdding = true
@@ -156,10 +176,21 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .glassCircle(diameter: 36)
                 .help("Добавить ссылку из YouTube")
+                .accessibilityLabel("Добавить ссылку")
+                .accessibilityHint("Открывает окно добавления треков из YouTube")
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.leading, 96)
+    }
+
+    private var sessionToggleAccessibilityLabel: String {
+        switch timer.phase {
+        case .work, .breakPhase:
+            return timer.isPaused ? "Продолжить сессию" : "Приостановить сессию"
+        default:
+            return "Запустить сессию"
+        }
     }
 
     private var sessionControls: some View {
@@ -168,6 +199,8 @@ struct ContentView: View {
                 controller.resetSession()
             }
             .help("Сбросить сессию")
+            .accessibilityLabel("Сбросить сессию")
+            .accessibilityHint("Останавливает таймер и воспроизведение")
 
             PlayerButton(
                 systemName: timer.phase == .work || timer.phase == .breakPhase
@@ -179,11 +212,15 @@ struct ContentView: View {
                 controller.toggleSession()
             }
             .help("Старт / пауза (пробел)")
+            .accessibilityLabel(sessionToggleAccessibilityLabel)
+            .accessibilityHint("Запускает и ставит на паузу таймер с музыкой; работает и клавиша пробел")
 
             PlayerButton(systemName: "forward.end.fill", size: 46) {
-                timer.skipPhase()
+                controller.skipPhase()
             }
             .help("Следующая фаза")
+            .accessibilityLabel("Следующая фаза")
+            .accessibilityHint("Переключает таймер на перерыв или следующий цикл")
         }
     }
 
@@ -191,13 +228,13 @@ struct ContentView: View {
         HStack(spacing: 10) {
             HStack(spacing: 2) {
                 modeButton("Отсчёт", value: .countdown)
-                modeButton("Помодоро", value: .pomodoro)
+                modeButton("Помодори", value: .pomodoro)
             }
             .liquidGlass(in: Capsule())
 
             Spacer()
 
-            ForEach(presetMinutes, id: \.self) { minutes in
+            ForEach(AppDefaults.presetDurations, id: \.self) { minutes in
                 DurationChip(
                     label: Theme.shortDuration(minutes),
                     isSelected: controller.sessionMinutes == minutes,
@@ -208,7 +245,7 @@ struct ContentView: View {
             }
 
             Menu {
-                ForEach(menuMinutes, id: \.self) { minutes in
+                ForEach(AppDefaults.allDurations, id: \.self) { minutes in
                     Button("\(Theme.shortDuration(minutes)) (\(minutes) мин)") {
                         controller.setDuration(minutes)
                     }
@@ -217,10 +254,10 @@ struct ContentView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 10, weight: .semibold))
-                    Text(presetMinutes.contains(controller.sessionMinutes) ? "ещё" : Theme.shortDuration(controller.sessionMinutes))
+                    Text(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? "ещё" : Theme.shortDuration(controller.sessionMinutes))
                         .font(.system(size: 12, weight: .semibold))
                 }
-                .foregroundStyle(presetMinutes.contains(controller.sessionMinutes) ? .white.opacity(0.65) : tint)
+                .foregroundStyle(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? .white.opacity(0.65) : tint)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .background(Capsule().fill(.white.opacity(0.06)))
@@ -234,7 +271,7 @@ struct ContentView: View {
 
             if controller.timerMode == .pomodoro {
                 Menu {
-                    ForEach([5, 10, 15], id: \.self) { minutes in
+                    ForEach(AppDefaults.breakChoices, id: \.self) { minutes in
                         Button("\(minutes) мин") { controller.breakMinutes = minutes }
                     }
                 } label: {
@@ -324,8 +361,14 @@ struct ContentView: View {
             .padding(.bottom, 12)
         }
         .id(message)
-        .task {
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
+        .task(id: message) {
+            do {
+                try await Task.sleep(nanoseconds: 6_000_000_000)
+            } catch {
+                // Задача отменена: сообщение уже сменилось — новое не трогаем.
+                return
+            }
+            guard player.statusText == message else { return }
             player.statusText = nil
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: player.statusText)
@@ -336,6 +379,7 @@ struct ContentView: View {
         Group {
             Button("") { controller.toggleSession() }
                 .keyboardShortcut(.space, modifiers: [])
+                .disabled(textFieldFocused || isAdding)
             Button("") { player.next() }
                 .keyboardShortcut(.rightArrow, modifiers: .command)
             Button("") { player.previous() }
@@ -358,6 +402,7 @@ struct ContentView: View {
 
 struct PlayerBar: View {
     @ObservedObject var player: PlayerCore
+    @ObservedObject var controller: SessionController
     @Binding var volume: Double
 
     @State private var scrub: Double = 0
@@ -366,11 +411,27 @@ struct PlayerBar: View {
     var body: some View {
         HStack(spacing: 16) {
             PlayerButton(systemName: "backward.fill", size: 36) { player.previous() }
+                .help("Предыдущий трек")
+                .accessibilityLabel("Предыдущий трек")
+                .accessibilityHint("Включает предыдущий трек очереди")
             PlayerButton(
                 systemName: player.isPlaying ? "pause.fill" : "play.fill",
                 size: 44
-            ) { player.toggle() }
+            ) { controller.toggleSession() }
+                .help("Пауза сессии (Space)")
+                .accessibilityLabel(player.isPlaying ? "Приостановить сессию" : "Запустить сессию")
+                .accessibilityHint("Ставит сессию на паузу и возвращает к работе; работает и клавиша пробел")
             PlayerButton(systemName: "forward.fill", size: 36) { player.next() }
+                .help("Следующий трек")
+                .accessibilityLabel("Следующий трек")
+                .accessibilityHint("Включает следующий трек очереди")
+
+            if player.needsRetry {
+                PlayerButton(systemName: "arrow.clockwise", size: 36) { player.retry() }
+                    .help("Повторить загрузку трека")
+                    .accessibilityLabel("Повторить загрузку")
+                    .accessibilityHint("Перезапускает загрузку трека после ошибки")
+            }
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -383,13 +444,22 @@ struct PlayerBar: View {
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if let track = player.current, track.isLive {
-                        Text("LIVE")
-                            .font(.system(size: 9, weight: .heavy))
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(.red.opacity(0.15)))
+                    if let track = player.current {
+                        switch track.status {
+                        case .live:
+                            Text("LIVE")
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundStyle(.red)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(.red.opacity(0.15)))
+                        case .unknown:
+                            Text("длительность неизвестна")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.45))
+                        case .vod:
+                            EmptyView()
+                        }
                     }
                 }
                 Text(player.current?.channel ?? "—")
@@ -412,6 +482,7 @@ struct PlayerBar: View {
                 )
                 .frame(width: 170)
                 .controlSize(.small)
+                .accessibilityLabel("Позиция воспроизведения")
                 .onChange(of: player.elapsed) { _, newValue in
                     if !isScrubbing { scrub = newValue }
                 }
@@ -429,6 +500,8 @@ struct PlayerBar: View {
                 Slider(value: $volume, in: 0...1)
                     .frame(width: 100)
                     .controlSize(.small)
+                    .accessibilityLabel("Громкость")
+                    .accessibilityHint("Регулирует громкость воспроизведения")
             }
         }
         .padding(.horizontal, 18)

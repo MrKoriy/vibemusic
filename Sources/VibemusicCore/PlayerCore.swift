@@ -1,11 +1,16 @@
 import Foundation
 import AVFoundation
 import Combine
+import os
 
 private final class FadeState: @unchecked Sendable {
     var steps = 16
 }
 
+/// Плеер без гонок: любое переключение (play/next/previous/stop/reset)
+/// поднимает поколение воспроизведения и отменяет все висящие задачи —
+/// резолвы, stall-ватчдоги, авто-переключения и fade не могут
+/// «воскресить» воспроизведение или глушить новый трек (аудит A-1, A-2).
 @MainActor
 public final class PlayerCore: ObservableObject {
     @Published public private(set) var current: Track?
@@ -13,11 +18,18 @@ public final class PlayerCore: ObservableObject {
     @Published public private(set) var isLoading = false
     @Published public private(set) var elapsed: Double = 0
     @Published public private(set) var duration: Double = 0
+    @Published public private(set) var needsRetry = false
     @Published public var statusText: String?
     @Published public var volume: Float = 0.85 {
         didSet { player.volume = volume }
     }
 
+    /// DI-хук для тестов: резолв ссылки на поток.
+    public var resolve: (String, String?) async throws -> (URL, Bool) = { videoID, proxy in
+        try await YTResolver.firstSuccess(videoID: videoID, proxy: proxy)
+    }
+
+    private let logger = Logger(subsystem: "com.vibemusic.app", category: "player")
     private let player = AVPlayer()
     private var queue: [Track] = []
     private var index = 0
@@ -26,8 +38,10 @@ public final class PlayerCore: ObservableObject {
     private nonisolated(unsafe) var timeObserver: Any?
     private var loadTask: Task<Void, Never>?
     private var stallTask: Task<Void, Never>?
+    private var autoNextTasks: [UUID: Task<Void, Never>] = [:]
     private nonisolated(unsafe) var fadeTimer: Timer?
     private var activeStream: LocalStream?
+    private var playbackGeneration = UUID()
 
     public init() {
         player.volume = volume
@@ -79,11 +93,14 @@ public final class PlayerCore: ObservableObject {
         fadeTimer?.invalidate()
     }
 
+    // MARK: - Публичное управление
+
     public func play(category: MusicCategory, shuffle: Bool) {
         guard !category.tracks.isEmpty else {
             statusText = "В этой категории нет треков"
             return
         }
+        cancelPlayback()
         queue = shuffle ? category.tracks.shuffled() : category.tracks
         index = 0
         loadCurrent()
@@ -91,13 +108,24 @@ public final class PlayerCore: ObservableObject {
 
     public func next() {
         guard !queue.isEmpty else { return }
+        cancelPlayback()
         index = (index + 1) % queue.count
         loadCurrent()
     }
 
     public func previous() {
         guard !queue.isEmpty else { return }
+        cancelPlayback()
         index = (index - 1 + queue.count) % queue.count
+        loadCurrent()
+    }
+
+    /// Повторить неудавшийся трек (аудит A-7).
+    public func retry() {
+        guard !queue.isEmpty else { return }
+        logger.info("retry запрошен")
+        needsRetry = false
+        cancelPlayback()
         loadCurrent()
     }
 
@@ -119,29 +147,89 @@ public final class PlayerCore: ObservableObject {
     }
 
     public func stop(fade: Bool) {
-        fadeTimer?.invalidate()
-        fadeTimer = nil
-        guard fade else {
+        if fade, player.currentItem != nil {
+            let generation = prepareFade()
+            runFade(generation: generation)
+        } else {
+            cancelPlayback()
             player.pause()
-            return
         }
+    }
+
+    /// Полная остановка: отмена всех задач, очистка плеера и состояния.
+    public func reset() {
+        logger.info("reset: полная остановка")
+        cancelPlayback()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        current = nil
+        needsRetry = false
+        statusText = nil
+        elapsed = 0
+        duration = 0
+        isPlaying = false
+    }
+
+    // MARK: - Отмена и fade
+
+    /// Единая точка отмены: поднимает поколение, снимает все висящие задачи,
+    /// закрывает стрим. Любой устаревший колбэк по поколению — no-op.
+    private func cancelPlayback() {
+        playbackGeneration = UUID()
+        loadTask?.cancel()
+        loadTask = nil
+        stallTask?.cancel()
+        stallTask = nil
+        for task in autoNextTasks.values {
+            task.cancel()
+        }
+        autoNextTasks.removeAll()
+        itemCancellables.removeAll()
+        if fadeTimer != nil {
+            fadeTimer?.invalidate()
+            fadeTimer = nil
+            // Прерванный fade обязан вернуть громкость.
+            player.volume = volume
+        }
+        if let activeStream {
+            StreamHub.shared.closeStream(activeStream)
+            self.activeStream = nil
+        }
+        isLoading = false
+    }
+
+    private func prepareFade() -> UUID {
+        cancelPlayback()
+        return playbackGeneration
+    }
+
+    private func runFade(generation: UUID) {
         let originalVolume = volume
+        player.volume = originalVolume
         let state = FadeState()
         fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let timer = self.fadeTimer else { return }
+                // Устаревшее поколение = начато новое воспроизведение — fade молчит.
+                guard generation == self.playbackGeneration else {
+                    timer.invalidate()
+                    return
+                }
                 state.steps -= 1
                 if state.steps <= 0 {
                     self.player.pause()
                     self.player.volume = originalVolume
                     timer.invalidate()
                     self.fadeTimer = nil
+                    self.logger.info("fade завершён, пауза")
                 } else {
                     self.player.volume = originalVolume * (Float(state.steps) / 16.0)
                 }
             }
         }
     }
+
+    // MARK: - Загрузка текущего трека
 
     private func loadCurrent() {
         guard queue.indices.contains(index) else { return }
@@ -150,34 +238,33 @@ public final class PlayerCore: ObservableObject {
         isLoading = true
         statusText = nil
         let expectedID = track.id
-        loadTask?.cancel()
-        stallTask?.cancel()
-        itemCancellables.removeAll()
-        if let oldStream = activeStream {
-            StreamHub.shared.closeStream(oldStream)
-            activeStream = nil
-        }
+        let generation = playbackGeneration
+        logger.info("загрузка «\(track.title, privacy: .public)»")
+
         loadTask = Task { [weak self] in
             guard let self else { return }
             let resolveStart = Date()
             do {
                 let proxyTool = ProxyConfig.load().toolURL
-                let raced = try await YTResolver.firstSuccess(videoID: expectedID, proxy: proxyTool)
-                let url = raced.url
-                guard !Task.isCancelled, self.current?.id == expectedID else { return }
+                let raced = try await self.resolve(expectedID, proxyTool)
+                // Поколение сменилось (reset/next/stop) — результат неактуален.
+                guard !Task.isCancelled,
+                      generation == self.playbackGeneration,
+                      self.current?.id == expectedID else { return }
 
-                let isManifest = url.path.hasSuffix(".m3u8") || url.path.hasSuffix(".mpd") || url.pathExtension == "m3u8" || url.absoluteString.contains(".m3u8")
                 let item: AVPlayerItem
-                if isManifest {
-                    item = AVPlayerItem(url: url)
+                if YTResolver.isManifestURL(raced.0) {
+                    item = AVPlayerItem(url: raced.0)
                 } else {
                     // Качка тем же маршрутом, что и резолв: googlevideo
                     // привязывает ссылку к IP запросившего.
-                    let streamProxy = raced.viaProxy ? proxyTool : nil
+                    let streamProxy = raced.1 ? proxyTool : nil
                     let stream = try await Task.detached(priority: .userInitiated) {
-                        try StreamHub.shared.openStream(upstream: url, proxy: streamProxy)
+                        try StreamHub.shared.openStream(upstream: raced.0, proxy: streamProxy)
                     }.value
-                    guard !Task.isCancelled, self.current?.id == expectedID else {
+                    guard !Task.isCancelled,
+                          generation == self.playbackGeneration,
+                          self.current?.id == expectedID else {
                         StreamHub.shared.closeStream(stream)
                         return
                     }
@@ -188,61 +275,92 @@ public final class PlayerCore: ObservableObject {
                 item.publisher(for: \.status)
                     .receive(on: RunLoop.main)
                     .sink { [weak self] status in
-                        guard let self, status == .failed, self.current?.id == expectedID else { return }
-                        self.statusText = "Трек недоступен, переключаюсь…"
-                        self.autoNext(trackID: expectedID)
+                        guard let self,
+                              status == .failed,
+                              generation == self.playbackGeneration,
+                              self.current?.id == expectedID else { return }
+                        self.logger.warning("item failed, переключение")
+                        self.handleLoadFailure(trackID: expectedID, slow: false)
                     }
                     .store(in: &self.itemCancellables)
 
                 self.player.replaceCurrentItem(with: item)
                 self.player.volume = self.volume
                 self.player.play()
+                self.needsRetry = false
                 self.prefetchSurrounding()
 
                 self.stallTask = Task { [weak self] in
                     try? await Task.sleep(nanoseconds: 14_000_000_000)
                     guard !Task.isCancelled, let self else { return }
-                    if self.current?.id == expectedID,
+                    if generation == self.playbackGeneration,
+                       self.current?.id == expectedID,
                        !self.isPlaying,
                        self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                        self.logger.warning("stall 14с, переключение")
                         self.statusText = "Поток не отвечает, переключаюсь…"
                         self.next()
                     }
                 }
             } catch {
-                if Task.isCancelled { return }
+                guard !Task.isCancelled,
+                      generation == self.playbackGeneration else { return }
                 let resolveSeconds = Date().timeIntervalSince(resolveStart)
                 if let resolverError = error as? ResolverError, case .ytDlpMissing = resolverError {
                     self.statusText = resolverError.errorDescription
-                } else if resolveSeconds > 12 {
-                    // Медленный фейл = сетевая проблема (YouTube недоступен/заторможен),
-                    // не гоняем autoNext по всей библиотеке.
-                    self.statusText = "YouTube недоступен — проверьте сеть и попробуйте ещё раз"
                 } else {
-                    self.statusText = "Не удалось загрузить «\(track.title)»"
-                    self.autoNext(trackID: expectedID)
+                    self.handleLoadFailure(trackID: expectedID, slow: resolveSeconds > YTResolver.slowResolveThreshold)
                 }
             }
-            if self.current?.id == expectedID {
+            if generation == self.playbackGeneration,
+               self.current?.id == expectedID {
                 self.isLoading = false
             }
         }
     }
 
+    /// Единая обработка неудачи загрузки (аудит A-7, B-9).
+    private func handleLoadFailure(trackID: String, slow: Bool) {
+        if slow {
+            // Медленный фейл = сетевая проблема (YouTube недоступен/заторможен),
+            // не гоняем autoNext по всей библиотеке.
+            logger.warning("медленный фейл резолва — сеть")
+            statusText = "YouTube недоступен — проверьте сеть и попробуйте ещё раз"
+            needsRetry = true
+            return
+        }
+        if queue.count > 1 {
+            statusText = "Не удалось загрузить «\(current?.title ?? "")»"
+            needsRetry = false
+            autoNext(trackID: trackID)
+        } else {
+            logger.warning("единственный трек недоступен — нужен retry")
+            statusText = "Не удалось загрузить «\(current?.title ?? "")» — нажмите ↻"
+            needsRetry = true
+        }
+    }
+
     private func autoNext(trackID: String) {
-        guard queue.count > 1 else { return }
-        Task { [weak self] in
+        let generation = playbackGeneration
+        let id = UUID()
+        autoNextTasks[id] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard let self, self.current?.id == trackID, !self.isPlaying else { return }
+            guard let self else { return }
+            self.autoNextTasks.removeValue(forKey: id)
+            guard !Task.isCancelled,
+                  generation == self.playbackGeneration,
+                  self.current?.id == trackID,
+                  !self.isPlaying else { return }
             self.next()
         }
     }
 
+    // MARK: - Префетч
+
     private func prefetchSurrounding() {
         guard !queue.isEmpty else { return }
         let nextIndex = (index + 1) % queue.count
-        let nextTrack = queue[nextIndex]
-        prefetch(track: nextTrack)
+        prefetch(track: queue[nextIndex])
     }
 
     public func prefetch(track: Track) {
@@ -257,4 +375,12 @@ public final class PlayerCore: ObservableObject {
         guard let first = category.tracks.first else { return }
         prefetch(track: first)
     }
+}
+
+// MARK: - Тестовые наблюдатели (используются только через @testable)
+
+extension PlayerCore {
+    var playerVolume: Float { player.volume }
+    var isFadeActive: Bool { fadeTimer != nil }
+    var hasCurrentItem: Bool { player.currentItem != nil }
 }

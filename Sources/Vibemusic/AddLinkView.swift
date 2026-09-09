@@ -9,6 +9,22 @@ struct AddLinkView: View {
     @State private var loaded: [Track] = []
     @State private var isLoading = false
     @State private var errorText: String?
+    @State private var loadTask: Task<Void, Never>?
+    @State private var importMode: ImportMode = .playlist
+
+    enum ImportMode: String, CaseIterable, Identifiable {
+        case video
+        case playlist
+
+        var id: String { rawValue }
+    }
+
+    enum LinkTarget {
+        case video
+        case playlist
+        case mixed
+        case auto
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -25,6 +41,8 @@ struct AddLinkView: View {
                         .foregroundStyle(.white.opacity(0.4))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Закрыть окно")
+                .accessibilityHint("Закрывает окно без добавления треков")
             }
 
             HStack(spacing: 10) {
@@ -44,6 +62,16 @@ struct AddLinkView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty || isLoading)
+                .accessibilityHint("Загружает метаданные треков по указанной ссылке")
+            }
+
+            if linkTarget == .mixed {
+                Picker("Что добавить", selection: $importMode) {
+                    Text("Видео").tag(ImportMode.video)
+                    Text("Плейлист (до 50)").tag(ImportMode.playlist)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
 
             if let errorText {
@@ -100,7 +128,13 @@ struct AddLinkView: View {
             Spacer()
 
             HStack {
-                Button("Отмена") { dismiss() }
+                Button(isLoading ? "Отменить загрузку" : "Отмена") {
+                    if isLoading {
+                        loadTask?.cancel()
+                    } else {
+                        dismiss()
+                    }
+                }
                 Spacer()
                 Button("Добавить в библиотеку") {
                     store.addUserTracks(loaded)
@@ -113,6 +147,9 @@ struct AddLinkView: View {
         .padding(22)
         .background(Color(red: 0.07, green: 0.06, blue: 0.15))
         .preferredColorScheme(.dark)
+        .onDisappear {
+            loadTask?.cancel()
+        }
     }
 
     private func trackRow(_ track: Track, showDelete: Bool, onDelete: @escaping () -> Void) -> some View {
@@ -124,6 +161,8 @@ struct AddLinkView: View {
                         .foregroundStyle(.red.opacity(0.8))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Удалить трек")
+                .accessibilityHint("Убирает трек из «Мои ссылки»")
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.title)
@@ -136,9 +175,12 @@ struct AddLinkView: View {
                     if let durationLabel = track.durationLabel {
                         Text("· \(durationLabel)")
                             .foregroundStyle(.white.opacity(0.4))
-                    } else {
+                    } else if track.isLive {
                         Text("· в эфире")
                             .foregroundStyle(.red.opacity(0.7))
+                    } else {
+                        Text("· длительность неизвестна")
+                            .foregroundStyle(.white.opacity(0.35))
                     }
                 }
                 .font(.system(size: 10))
@@ -150,27 +192,70 @@ struct AddLinkView: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.04)))
     }
 
+    private var linkTarget: LinkTarget {
+        Self.classify(urlText)
+    }
+
+    /// Разбор ссылки через URLComponents: v= и list= → выбор пользователя,
+    /// только list= → плейлист, без list= → видео, иначе авто-детект резолвера.
+    /// nonisolated: чистая логика, вызывается и из тестов без главного актора.
+    nonisolated static func classify(_ raw: String) -> LinkTarget {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .auto }
+        if trimmed.count == 11, trimmed.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil {
+            return .video
+        }
+        guard let components = URLComponents(string: trimmed) else { return .auto }
+        let items = components.queryItems ?? []
+        let videoID = (items.first { $0.name == "v" }?.value ?? "").trimmingCharacters(in: .whitespaces)
+        let playlistID = (items.first { $0.name == "list" }?.value ?? "").trimmingCharacters(in: .whitespaces)
+        let shortPath = components.path.dropFirst()
+        let hasVideo = !videoID.isEmpty || (components.host == "youtu.be" && !shortPath.isEmpty)
+        let hasPlaylist = !playlistID.isEmpty
+        switch (hasVideo, hasPlaylist) {
+        case (true, true): return .mixed
+        case (false, true): return .playlist
+        case (true, false): return .video
+        case (false, false): return .auto
+        }
+    }
+
     private func load() {
         let raw = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty, !isLoading else { return }
+        let playlistFlag: Bool?
+        switch linkTarget {
+        case .mixed:
+            playlistFlag = importMode == .playlist
+        case .playlist:
+            playlistFlag = true
+        case .video:
+            playlistFlag = false
+        case .auto:
+            playlistFlag = nil
+        }
         isLoading = true
         errorText = nil
         loaded = []
-        Task {
+        loadTask = Task {
+            defer { isLoading = false }
             do {
                 let proxy = ProxyConfig.load().toolURL
-                let tracks = try await Task.detached(priority: .userInitiated) {
-                    try YTResolver.importTracks(from: raw, proxy: proxy)
-                }.value
-                await MainActor.run {
-                    loaded = tracks
-                    isLoading = false
+                let worker = Task.detached(priority: .userInitiated) {
+                    try YTResolver.importTracks(from: raw, proxy: proxy, playlist: playlistFlag)
                 }
+                let tracks = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
+                guard !Task.isCancelled else { return }
+                loaded = tracks
+            } catch is CancellationError {
+                // Отмена пользователем — тихо возвращаемся к вводу ссылки.
             } catch {
-                await MainActor.run {
-                    errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                    isLoading = false
-                }
+                guard !Task.isCancelled else { return }
+                errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
         }
     }

@@ -19,6 +19,7 @@ public final class StatsStore: ObservableObject {
     @Published public private(set) var records: [SessionRecord] = [] {
         didSet { persist() }
     }
+    @Published public private(set) var lastLoadError: String?
 
     private let fileURL: URL
 
@@ -81,13 +82,20 @@ public final class StatsStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let loaded = try? JSONDecoder().decode([SessionRecord].self, from: data) else { return }
-        records = loaded
+        switch PersistenceUtil.load([SessionRecord].self, from: fileURL) {
+        case .loaded(let loaded):
+            records = loaded
+        case .missing:
+            break
+        case .corrupted:
+            records = []
+            lastLoadError = "Файл статистики повреждён; создана резервная копия"
+        }
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        guard let data = try? JSONEncoder().encode(records),
+              (try? data.write(to: fileURL, options: .atomic)) != nil else { return }
+        lastLoadError = nil
     }
 }

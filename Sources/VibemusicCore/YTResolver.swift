@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum ResolverError: LocalizedError {
     case ytDlpMissing
@@ -21,6 +22,16 @@ public enum ResolverError: LocalizedError {
 }
 
 public enum YTResolver {
+    private static let logger = Logger(subsystem: "com.vibemusic.app", category: "network")
+
+    /// Порог «медленного» резолва: дольше — считаем сетью, а не треком.
+    public static let slowResolveThreshold: TimeInterval = 12
+
+    /// Манифест HLS/DASH воспроизводится AVPlayer напрямую, без curl-прокачки.
+    public static func isManifestURL(_ url: URL) -> Bool {
+        url.path.hasSuffix(".m3u8") || url.path.hasSuffix(".mpd")
+    }
+
     private static let candidates: [String] = {
         var paths: [String] = []
         if Bundle.main.bundlePath.hasSuffix(".app") {
@@ -115,7 +126,7 @@ public enum YTResolver {
 
     public static func streamURL(for videoID: String, proxy: String? = nil) throws -> URL {
         var arguments = [
-            "-f", "ba[protocol^=m3u8]/234/233/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
+            "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]/bestaudio[protocol^=m3u8]",
             "-g", "--no-warnings", "--no-playlist",
         ]
         if let proxy {
@@ -130,50 +141,104 @@ public enum YTResolver {
         return url
     }
 
-    /// Гонка: прямой резолв и через прокси параллельно, побеждает первый успешный.
-    /// Маршрут важен: ссылка googlevideo привязана к IP запросившего.
+    /// Резолв ссылки с учётом режима прокси из ProxyConfig:
+    /// forced — только прокси-ветка (прямой yt-dlp не запускаем),
+    /// direct — только прямая, auto — гонка, побеждает первый успешный.
+    /// Маршрут важен: ссылка googlevideo привязана к IP запросившего, поэтому
+    /// кэш сверяется по отпечатку текущего прокси и пишется вместе с ним.
     /// Дети группы блокируются на Process — это осознанно: за счёт структурной
     /// конкурентности отмена задачи завершает проигравший процесс мгновенно.
     public static func firstSuccess(videoID: String, proxy: String?) async throws -> (url: URL, viaProxy: Bool) {
-        if let cached = StreamURLCache.shared.get(videoID: videoID) {
-            return cached
+        let config = ProxyConfig.load()
+        let started = Date()
+
+        if config.mode == .forced, proxy == nil {
+            logger.error("resolve id=\(videoID, privacy: .public) route=forced failed: proxy not configured")
+            throw ResolverError.failed("Режим «только через прокси» включён, но прокси не настроен")
         }
-        let result = try await withThrowingTaskGroup(of: Result<(URL, Bool), Error>.self) { group in
-            group.addTask {
-                do {
-                    return .success((try streamURL(for: videoID, proxy: nil), false))
-                } catch {
-                    return .failure(error)
-                }
+
+        // Отпечаток фактического маршрута: direct — без прокси, иначе — прокси из параметра.
+        let routeFingerprint: String? = config.mode == .direct
+            ? nil
+            : proxy.flatMap(ProxyConfig.fingerprint(ofToolURL:))
+
+        if let cached = StreamURLCache.shared.get(videoID: videoID, route: routeFingerprint) {
+            // В forced-режиме прямые записи не переиспользуем даже при совпадении отпечатка.
+            if config.mode != .forced || cached.viaProxy {
+                logger.log("resolve id=\(videoID, privacy: .public) route=cache hit")
+                return cached
             }
-            if let proxy {
-                group.addTask {
-                    do {
-                        return .success((try streamURL(for: videoID, proxy: proxy), true))
-                    } catch {
-                        return .failure(error)
+        }
+
+        let raceDirect: Bool
+        let raceProxy: Bool
+        switch config.mode {
+        case .direct:
+            raceDirect = true
+            raceProxy = false
+        case .forced:
+            raceDirect = false
+            raceProxy = true
+        case .auto:
+            raceDirect = true
+            raceProxy = proxy != nil
+        }
+
+        do {
+            let result = try await withThrowingTaskGroup(of: Result<(URL, Bool), Error>.self) { group in
+                if raceDirect {
+                    group.addTask {
+                        do {
+                            return .success((try streamURL(for: videoID, proxy: nil), false))
+                        } catch {
+                            return .failure(error)
+                        }
                     }
                 }
-            }
-            var lastError: Error?
-            for try await result in group {
-                if case .success(let value) = result {
-                    group.cancelAll()
-                    return value
+                if raceProxy, let proxy {
+                    group.addTask {
+                        do {
+                            return .success((try streamURL(for: videoID, proxy: proxy), true))
+                        } catch {
+                            return .failure(error)
+                        }
+                    }
                 }
-                if case .failure(let error) = result {
-                    lastError = error
+                var lastError: Error?
+                for try await result in group {
+                    if case .success(let value) = result {
+                        group.cancelAll()
+                        return value
+                    }
+                    if case .failure(let error) = result {
+                        lastError = error
+                    }
                 }
+                throw lastError ?? ResolverError.noStream
             }
-            throw lastError ?? ResolverError.noStream
+            StreamURLCache.shared.set(
+                videoID: videoID,
+                url: result.0,
+                viaProxy: result.1,
+                fingerprint: routeFingerprint
+            )
+            logger.log(
+                "resolve id=\(videoID, privacy: .public) route=\(result.1 ? "proxy" : "direct", privacy: .public) seconds=\(Date().timeIntervalSince(started), format: .fixed(precision: 2), privacy: .public)"
+            )
+            return result
+        } catch {
+            if !Task.isCancelled {
+                logger.error(
+                    "resolve id=\(videoID, privacy: .public) route=\(config.mode.rawValue, privacy: .public) failed seconds=\(Date().timeIntervalSince(started), format: .fixed(precision: 2), privacy: .public)"
+                )
+            }
+            throw error
         }
-        StreamURLCache.shared.set(videoID: videoID, url: result.0, viaProxy: result.1)
-        return result
     }
 
-    public static func importTracks(from raw: String, proxy: String? = nil) throws -> [Track] {
+    public static func importTracks(from raw: String, proxy: String? = nil, playlist: Bool? = nil) throws -> [Track] {
         let argument = normalize(raw)
-        let isPlaylist = raw.contains("list=")
+        let isPlaylist = playlist ?? raw.contains("list=")
         var arguments: [String]
         if isPlaylist {
             arguments = ["-J", "--skip-download", "--flat-playlist", "--playlist-items", "1:50"]

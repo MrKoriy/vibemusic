@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import AppKit
+import SwiftUI
 import MediaPlayer
 import VibemusicCore
 
@@ -11,6 +13,8 @@ final class NowPlayingManager: @unchecked Sendable {
     private var controller: SessionController?
     private var isActivated = false
     private var cancellables = Set<AnyCancellable>()
+    private var artworkCategoryID: String?
+    private var cachedArtwork: MPMediaItemArtwork?
 
     private init() {}
 
@@ -79,6 +83,16 @@ final class NowPlayingManager: @unchecked Sendable {
 
     private func updateInfo() {
         guard let player else { return }
+        // E-11: не оставляем призрак трека после остановки/сброса — чистим центр,
+        // когда трека нет либо плеер стоит вне активной сессии (idle/finished).
+        // Пауза внутри work/break-фазы призраком не считается: инфо остаётся
+        // с PlaybackRate 0.
+        let phase = controller?.timer.phase
+        let sessionInactive = phase == nil || phase == .idle || phase == .finished
+        if player.current == nil || (!player.isPlaying && sessionInactive) {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: player.current?.title ?? "Vibemusic",
             MPMediaItemPropertyArtist: player.current?.channel ?? "фокус · медитация · сон",
@@ -88,6 +102,57 @@ final class NowPlayingManager: @unchecked Sendable {
         if player.duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = player.duration
         }
+        if let artwork = currentArtwork() {
+            info[MPMediaItemPropertyArtwork] = artwork
+        }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func currentArtwork() -> MPMediaItemArtwork? {
+        let categoryID = controller?.selectedCategoryID ?? "work"
+        if categoryID == artworkCategoryID { return cachedArtwork }
+        let artwork = Self.makeArtwork(categoryID: categoryID)
+        artworkCategoryID = categoryID
+        cachedArtwork = artwork
+        return artwork
+    }
+
+    /// Обложка без сети (E-11): вертикальный градиент цвета категории
+    /// (Theme.color) + крупный белый SF-символ режима (Theme.symbol), 512×512.
+    private static func makeArtwork(categoryID: String) -> MPMediaItemArtwork? {
+        let side: CGFloat = 512
+        let bounds = NSRect(x: 0, y: 0, width: side, height: side)
+        let image = NSImage(size: bounds.size)
+
+        let base = NSColor(Theme.color(for: categoryID)).usingColorSpace(.sRGB) ?? .systemBlue
+        let top = base.blended(withFraction: 0.30, of: .black) ?? base
+        let bottom = base.blended(withFraction: 0.70, of: .black) ?? base
+        guard let gradient = NSGradient(colors: [top, bottom]) else { return nil }
+
+        let symbol = NSImage(systemSymbolName: Theme.symbol(for: categoryID), accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
+        let configured = symbol?.withSymbolConfiguration(.init(pointSize: 230, weight: .bold))
+
+        image.lockFocus()
+        gradient.draw(in: bounds, angle: -90)
+        if let configured, let ctx = NSGraphicsContext.current?.cgContext {
+            var symbolRect = NSRect(
+                x: (side - configured.size.width) / 2,
+                y: (side - configured.size.height) / 2,
+                width: configured.size.width,
+                height: configured.size.height
+            )
+            // Template-символ рисуется чёрным независимо от текущего цвета,
+            // поэтому тонируем через маску: clip(alpha) + заливка белым.
+            if let mask = configured.cgImage(forProposedRect: &symbolRect, context: nil, hints: nil) {
+                ctx.saveGState()
+                ctx.clip(to: symbolRect, mask: mask)
+                ctx.setFillColor(NSColor.white.cgColor)
+                ctx.fill(symbolRect)
+                ctx.restoreGState()
+            }
+        }
+        image.unlockFocus()
+        return MPMediaItemArtwork(boundsSize: bounds.size) { _ in image }
     }
 }

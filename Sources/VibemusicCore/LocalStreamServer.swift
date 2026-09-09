@@ -1,5 +1,52 @@
 import Foundation
 import Network
+import os
+
+private let networkLogger = Logger(subsystem: "com.vibemusic.app", category: "network")
+
+/// Ограничивает число одновременно запущенных curl-процессов. Актор вместо
+/// DispatchSemaphore: ожидание слота не блокирует потоки кооперативного пула.
+private actor CurlSlotLimiter {
+    private var freeSlots: Int
+    private var nextTicket = 0
+    private var waiters: [Int: CheckedContinuation<Void, any Error>] = [:]
+
+    init(limit: Int) {
+        freeSlots = limit
+    }
+
+    func acquire() async throws {
+        try Task.checkCancellation()
+        guard freeSlots == 0 else {
+            freeSlots -= 1
+            return
+        }
+        let ticket = nextTicket
+        nextTicket += 1
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                waiters[ticket] = continuation
+            }
+        } onCancel: {
+            Task { await self.dropWaiter(ticket: ticket) }
+        }
+    }
+
+    func release() {
+        guard let first = waiters.keys.min(),
+              let waiter = waiters.removeValue(forKey: first) else {
+            freeSlots += 1
+            return
+        }
+        waiter.resume()
+    }
+
+    private func dropWaiter(ticket: Int) {
+        if let waiter = waiters.removeValue(forKey: ticket) {
+            waiter.resume(throwing: URLError(.cancelled))
+        }
+    }
+}
 
 /// Загрузка через системный curl. Нужна, потому что URLSession не умеет
 /// SOCKS5 с авторизацией, а AVPlayer-совместимый стриминг идёт через
@@ -11,12 +58,36 @@ enum CurlFetcher {
         let body: Data
     }
 
+    static let maxConcurrentProcesses = 4
+    private static let limiter = CurlSlotLimiter(limit: maxConcurrentProcesses)
+    private static let watchdogQueue = DispatchQueue(label: "vibemusic.curl.watchdog")
+
+    /// Асинхронная загрузка: максимум `maxConcurrentProcesses` параллельных
+    /// curl-процессов, кооперативная отмена задачи завершает процесс.
     static func fetch(
         url: URL,
         range: (start: Int64, end: Int64)? = nil,
         proxy: String? = nil,
         timeout: TimeInterval
-    ) throws -> Response {
+    ) async throws -> Response {
+        try await limiter.acquire()
+        do {
+            try Task.checkCancellation()
+            let response = try await runCurlProcess(url: url, range: range, proxy: proxy, timeout: timeout)
+            await limiter.release()
+            return response
+        } catch {
+            await limiter.release()
+            throw error
+        }
+    }
+
+    private static func runCurlProcess(
+        url: URL,
+        range: (start: Int64, end: Int64)?,
+        proxy: String?,
+        timeout: TimeInterval
+    ) async throws -> Response {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vibemusic-curl-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
@@ -39,26 +110,45 @@ enum CurlFetcher {
         }
         arguments.append(url.absoluteString)
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        task.arguments = arguments
-        let stderrPipe = Pipe()
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = stderrPipe
-        try task.run()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = Pipe()
 
         let watchdog = DispatchWorkItem {
-            if task.isRunning { task.terminate() }
+            if process.isRunning { process.terminate() }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout + 10, execute: watchdog)
-        task.waitUntilExit()
-        watchdog.cancel()
+        watchdogQueue.asyncAfter(deadline: .now() + timeout + 10, execute: watchdog)
+        defer { watchdog.cancel() }
+
+        // terminationHandler регистрируется до run(): даже мгновенный выход
+        // процесса гарантированно возобновит продолжение.
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                process.terminationHandler = { _ in
+                    continuation.resume()
+                }
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            if process.isRunning { process.terminate() }
+        }
+
+        if Task.isCancelled {
+            throw URLError(.cancelled)
+        }
 
         let body = (try? Data(contentsOf: URL(fileURLWithPath: bodyPath))) ?? Data()
         let headerDump = (try? String(contentsOf: URL(fileURLWithPath: headerPath), encoding: .utf8)) ?? ""
 
-        guard task.terminationStatus == 0 else {
-            throw mapError(exitCode: task.terminationStatus)
+        guard process.terminationStatus == 0 else {
+            networkLogger.warning("curl exited with code \(process.terminationStatus, privacy: .public)")
+            throw mapError(exitCode: process.terminationStatus)
         }
         let parsed = parse(headerDump: headerDump)
         return Response(status: parsed.status, headers: parsed.headers, body: body)
@@ -178,6 +268,7 @@ public final class StreamHub: @unchecked Sendable {
         streams[stream.token] = stream
         streamsLock.unlock()
         Self.log("stream \(stream.token.prefix(8)) -> \(upstream.host ?? "?")\(proxy != nil ? " [proxy]" : "")")
+        networkLogger.info("stream opened token=\(String(stream.token.prefix(8)), privacy: .public) proxy=\(proxy != nil, privacy: .public)")
         return stream
     }
 
@@ -186,6 +277,7 @@ public final class StreamHub: @unchecked Sendable {
         streams.removeValue(forKey: stream.token)
         streamsLock.unlock()
         stream.close()
+        networkLogger.info("stream closed token=\(String(stream.token.prefix(8)), privacy: .public)")
     }
 
     func stream(for token: String) -> LocalStream? {
@@ -194,20 +286,30 @@ public final class StreamHub: @unchecked Sendable {
         return streams[token]
     }
 
+    /// Аудит B-3: deny-by-default — соединение без remoteEndpoint или не с
+    /// loopback-адреса отклоняется. Сервер слушает только 127.0.0.1, но
+    /// проверка защищает от будущих изменений привязки.
     private func accept(_ connection: NWConnection) {
-        if case let .hostPort(host, _)? = connection.currentPath?.remoteEndpoint {
-            var loopback = false
-            switch host {
-            case .ipv4(let address): loopback = address == .loopback
-            case .ipv6(let address): loopback = address == .loopback
-            default: loopback = false
-            }
-            guard loopback else {
-                connection.cancel()
-                return
-            }
+        guard let endpoint = connection.currentPath?.remoteEndpoint,
+              case let .hostPort(host, _) = endpoint,
+              Self.isLoopbackHost(host) else {
+            networkLogger.notice("rejected connection without loopback endpoint")
+            connection.cancel()
+            return
         }
+        networkLogger.debug("accepted loopback connection")
         HTTPConnectionHandler(connection: connection, hub: self).run()
+    }
+
+    static func isLoopbackHost(_ host: NWEndpoint.Host) -> Bool {
+        switch host {
+        case .ipv4(let address):
+            return address == .loopback
+        case .ipv6(let address):
+            return address == .loopback
+        default:
+            return false
+        }
     }
 }
 
@@ -217,16 +319,21 @@ public final class LocalStream: @unchecked Sendable {
     public let localURL: URL
 
     static let chunkSize: Int64 = 1_048_576
-    static let maxCacheBytes = 48 * 1_048_576
+    static let maxCacheBytes: Int64 = 48 * 1_048_576
+    static let defaultContentType = "audio/mp4"
     static let userAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
 
     private let session: URLSession
     private let proxyURL: String?
+    private let cacheLimitBytes: Int64
     private let lock = NSLock()
     private var cache: [Int64: Data] = [:]
-    private var cacheBytes = 0
+    private var cacheBytes: Int64 = 0
+    private var cacheOrder: [Int64: UInt64] = [:]
+    private var cacheClock: UInt64 = 0
     private var totalLength: Int64?
+    private var contentType: String?
     private var inflight: [Int64: ChunkTask] = [:]
     private var closed = false
 
@@ -236,9 +343,10 @@ public final class LocalStream: @unchecked Sendable {
         init(task: Task<Data, Error>) { self.task = task }
     }
 
-    init(upstream: URL, port: UInt16, proxyURL: String? = nil) {
+    init(upstream: URL, port: UInt16, proxyURL: String? = nil, maxCacheBytes: Int64 = LocalStream.maxCacheBytes) {
         self.upstream = upstream
         self.proxyURL = proxyURL
+        self.cacheLimitBytes = maxCacheBytes
         self.localURL = URL(string: "http://127.0.0.1:\(port)/\(token).m4a")!
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
@@ -256,6 +364,7 @@ public final class LocalStream: @unchecked Sendable {
         let tasks = inflight.values.map(\.task)
         inflight.removeAll()
         cache.removeAll()
+        cacheOrder.removeAll()
         cacheBytes = 0
         lock.unlock()
         tasks.forEach { $0.cancel() }
@@ -286,28 +395,72 @@ public final class LocalStream: @unchecked Sendable {
         return Int64(header[header.index(after: slash)...].trimmingCharacters(in: .whitespaces))
     }
 
-    private func cachedData(forChunk lower: Int64) -> Data? {
+    var cachedChunkCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return closed ? nil : cache[lower]
+        return cache.count
     }
 
-    private func storeCache(chunkLower: Int64, data: Data) {
+    var cachedChunkBytes: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return cacheBytes
+    }
+
+    /// Читает чанк из кэша, обновляя время последнего использования (LRU).
+    func cachedData(forChunk lower: Int64) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed, let data = cache[lower] else { return nil }
+        cacheClock += 1
+        cacheOrder[lower] = cacheClock
+        return data
+    }
+
+    func storeCache(chunkLower: Int64, data: Data) {
         lock.lock()
         if closed {
             lock.unlock()
             return
         }
-        if cache[chunkLower] == nil {
-            cacheBytes += data.count
+        if let existing = cache[chunkLower] {
+            cacheBytes -= Int64(existing.count)
         }
         cache[chunkLower] = data
-        while cacheBytes > Self.maxCacheBytes, let smallest = cache.keys.min() {
-            if let removed = cache.removeValue(forKey: smallest) {
-                cacheBytes -= removed.count
+        cacheBytes += Int64(data.count)
+        cacheClock += 1
+        cacheOrder[chunkLower] = cacheClock
+        // Аудит B-7: при превышении лимита вытесняется самая давно
+        // использованная запись, а не минимальный оффсет.
+        while cacheBytes > cacheLimitBytes, let lru = leastRecentlyUsedChunk() {
+            cacheOrder.removeValue(forKey: lru)
+            if let removed = cache.removeValue(forKey: lru) {
+                cacheBytes -= Int64(removed.count)
             }
         }
         lock.unlock()
+    }
+
+    private func leastRecentlyUsedChunk() -> Int64? {
+        cacheOrder.min { $0.value < $1.value }?.key
+    }
+
+    // MARK: - Content-Type
+
+    /// Запоминает Content-Type из ответа upstream; первый ответ выигрывает.
+    func recordContentType(_ value: String?) {
+        guard let value else { return }
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        lock.lock()
+        if contentType == nil { contentType = cleaned }
+        lock.unlock()
+    }
+
+    func resolvedContentType() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return contentType ?? Self.defaultContentType
     }
 
     // MARK: - Загрузка чанков
@@ -315,12 +468,11 @@ public final class LocalStream: @unchecked Sendable {
     func ensureTotal() async throws -> Int64 {
         if let known = total() { return known }
         if let proxyURL {
-            let response = try await Task.detached(priority: .userInitiated) { [upstream] in
-                try CurlFetcher.fetch(url: upstream, range: (0, 1), proxy: proxyURL, timeout: 20)
-            }.value
+            let response = try await CurlFetcher.fetch(url: upstream, range: (0, 1), proxy: proxyURL, timeout: 20)
             guard (200...299).contains(response.status) else {
                 throw URLError(.badServerResponse)
             }
+            recordContentType(response.headers["content-type"])
             if let rangeHeader = response.headers["content-range"],
                let parsed = Self.parseTotal(rangeHeader) {
                 setTotal(parsed)
@@ -341,6 +493,7 @@ public final class LocalStream: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
+        recordContentType(http.value(forHTTPHeaderField: "Content-Type"))
         if let rangeHeader = http.value(forHTTPHeaderField: "Content-Range"),
            let parsed = Self.parseTotal(rangeHeader) {
             setTotal(parsed)
@@ -407,18 +560,16 @@ public final class LocalStream: @unchecked Sendable {
             upper = min(upper, total - 1)
         }
         if let proxyURL {
-            let upstream = self.upstream
-            let response = try await Task.detached(priority: .userInitiated) {
-                try CurlFetcher.fetch(
-                    url: upstream,
-                    range: (lower, upper),
-                    proxy: proxyURL,
-                    timeout: 45
-                )
-            }.value
+            let response = try await CurlFetcher.fetch(
+                url: upstream,
+                range: (lower, upper),
+                proxy: proxyURL,
+                timeout: 45
+            )
             guard (200...299).contains(response.status), !response.body.isEmpty else {
                 throw URLError(.badServerResponse)
             }
+            recordContentType(response.headers["content-type"])
             if let rangeHeader = response.headers["content-range"],
                let parsed = Self.parseTotal(rangeHeader), total() == nil {
                 setTotal(parsed)
@@ -426,6 +577,7 @@ public final class LocalStream: @unchecked Sendable {
             let capped = response.body.prefix(Int(Self.chunkSize))
             storeCache(chunkLower: lower, data: Data(capped))
             StreamHub.log("chunk \(lower)-\(lower + Int64(capped.count) - 1) via curl (\(capped.count) bytes)")
+            networkLogger.debug("chunk fetched offset=\(lower, privacy: .public) bytes=\(capped.count, privacy: .public) via curl")
             return Data(capped)
         }
         var request = URLRequest(url: upstream)
@@ -436,6 +588,7 @@ public final class LocalStream: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), !data.isEmpty else {
             throw URLError(.badServerResponse)
         }
+        recordContentType(http.value(forHTTPHeaderField: "Content-Type"))
         if let rangeHeader = http.value(forHTTPHeaderField: "Content-Range"),
            let parsed = Self.parseTotal(rangeHeader), total() == nil {
             setTotal(parsed)
@@ -443,11 +596,20 @@ public final class LocalStream: @unchecked Sendable {
         let capped = data.prefix(Int(Self.chunkSize))
         storeCache(chunkLower: lower, data: Data(capped))
         StreamHub.log("chunk \(lower)-\(lower + Int64(capped.count) - 1) fetched (\(capped.count) bytes)")
+        networkLogger.debug("chunk fetched offset=\(lower, privacy: .public) bytes=\(capped.count, privacy: .public)")
         return Data(capped)
     }
 }
 
 // MARK: - HTTP
+
+/// Разобранный Range-заголовок.
+enum RangeSpec: Equatable {
+    /// bytes=start-end или bytes=start-
+    case offset(start: Int64, end: Int64?)
+    /// bytes=-N — последние N байт файла (разрешается после ensureTotal)
+    case suffix(length: Int64)
+}
 
 final class HTTPConnectionHandler: @unchecked Sendable {
     private let connection: NWConnection
@@ -528,24 +690,57 @@ final class HTTPConnectionHandler: @unchecked Sendable {
         }
         let range = rangeHeader.flatMap(Self.parseRange)
         StreamHub.log("request token=\(token.prefix(8)) range=\(rangeHeader ?? "none")")
+        networkLogger.debug("request token=\(String(token.prefix(8)), privacy: .public) range=\(rangeHeader ?? "none", privacy: .public)")
 
         pumpTask = Task {
             await self.serve(stream: stream, range: range)
         }
     }
 
-    static func parseRange(_ value: String) -> (start: Int64, end: Int64?)? {
+    /// Аудит B-4: поддерживает bounded (bytes=0-99), open-ended (bytes=100-)
+    /// и суффиксный (bytes=-500) синтаксис. Невалидные строки → nil.
+    static func parseRange(_ value: String) -> RangeSpec? {
         guard value.lowercased().hasPrefix("bytes=") else { return nil }
         let spec = value.dropFirst(6)
         let bounds = spec.split(separator: "-", omittingEmptySubsequences: false)
-        guard bounds.count == 2,
-              let start = Int64(bounds[0].trimmingCharacters(in: .whitespaces)) else { return nil }
+        guard bounds.count == 2 else { return nil }
+        let startText = bounds[0].trimmingCharacters(in: .whitespaces)
         let endText = bounds[1].trimmingCharacters(in: .whitespaces)
+        if startText.isEmpty {
+            guard let length = Int64(endText), length > 0 else { return nil }
+            return .suffix(length: length)
+        }
+        guard let start = Int64(startText), start >= 0 else { return nil }
         let end = endText.isEmpty ? nil : Int64(endText)
-        return (start, end)
+        return .offset(start: start, end: end)
     }
 
-    private func serve(stream: LocalStream, range: (start: Int64, end: Int64?)?) async {
+    /// Разрешает RangeSpec в конкретные (start, end) при известном total.
+    /// Суффикс N > total → весь файл.
+    static func resolvedBounds(_ spec: RangeSpec?, total: Int64) -> (start: Int64, end: Int64) {
+        switch spec {
+        case nil:
+            return (0, total - 1)
+        case .suffix(let length):
+            let count = min(length, total)
+            return (total - count, total - 1)
+        case .offset(let start, let end):
+            let upperBound = min(end ?? (total - 1), total - 1)
+            return (start, upperBound)
+        }
+    }
+
+    /// Content-Type для ответа клиенту: реальный тип upstream с вырезанными
+    /// переводами строк (защита от подделки заголовков), дефолт — audio/mp4.
+    static func sanitizedContentType(_ value: String) -> String {
+        let cleaned = value
+            .components(separatedBy: .newlines)
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? LocalStream.defaultContentType : cleaned
+    }
+
+    private func serve(stream: LocalStream, range: RangeSpec?) async {
         do {
             let total = try await stream.ensureTotal()
             guard total > 0 else {
@@ -553,9 +748,9 @@ final class HTTPConnectionHandler: @unchecked Sendable {
                 return
             }
 
-            let start = range?.start ?? 0
-            var end = range?.end ?? (total - 1)
-            end = min(end, total - 1)
+            let resolved = Self.resolvedBounds(range, total: total)
+            let start = resolved.start
+            let end = resolved.end
             guard start >= 0, start <= end else {
                 respond416(total: total)
                 return
@@ -563,7 +758,7 @@ final class HTTPConnectionHandler: @unchecked Sendable {
 
             let length = end - start + 1
             var head = "HTTP/1.1 \(range == nil ? "200 OK" : "206 Partial Content")\r\n"
-            head += "Content-Type: audio/mp4\r\n"
+            head += "Content-Type: \(Self.sanitizedContentType(stream.resolvedContentType()))\r\n"
             if range != nil {
                 head += "Content-Range: bytes \(start)-\(end)/\(total)\r\n"
             }
@@ -586,6 +781,7 @@ final class HTTPConnectionHandler: @unchecked Sendable {
             }
         } catch {
             StreamHub.log("serve error: \(error.localizedDescription)")
+            networkLogger.error("serve failed: \(error.localizedDescription)")
         }
         finish()
     }

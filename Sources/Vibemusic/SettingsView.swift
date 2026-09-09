@@ -21,9 +21,8 @@ struct SettingsView: View {
 
 struct GeneralSettingsTab: View {
     @ObservedObject var controller: SessionController
-    @AppStorage("menuBarEnabled") private var menuBarEnabled = true
-    @AppStorage("proxyEnabled") private var proxyEnabled = true
-    @AppStorage("proxyURL") private var proxyURL = ProxyConfig.embeddedDefaultURL
+    @AppStorage(AppDefaults.Keys.menuBarEnabled) private var menuBarEnabled = AppDefaults.menuBarEnabled
+    @State private var proxy = ProxyConfig(enabled: true, url: "")
     @State private var loginError: String?
     @State private var proxyTestResult: String?
     @State private var proxyTesting = false
@@ -44,22 +43,32 @@ struct GeneralSettingsTab: View {
             }
 
             Section("Прокси для YouTube") {
-                Toggle("Использовать SOCKS5-прокси", isOn: $proxyEnabled)
-                TextField("socks5://user:pass@host:port", text: $proxyURL)
+                Toggle("Использовать SOCKS5-прокси", isOn: proxyEnabledBinding)
+                TextField("socks5://user:pass@host:port", text: proxyURLBinding)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
+                Picker("Режим", selection: proxyModeBinding) {
+                    Text("Авто (гонка)").tag(ProxyConfig.Mode.auto.rawValue)
+                    Text("Только прокси").tag(ProxyConfig.Mode.forced.rawValue)
+                    Text("Без прокси").tag(ProxyConfig.Mode.direct.rawValue)
+                }
+                if isProxyURLEmpty {
+                    Text("Укажите адрес прокси")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 HStack {
                     Button(proxyTesting ? "Проверяю…" : "Проверить соединение") {
                         testProxy()
                     }
-                    .disabled(proxyTesting || proxyURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(proxyTesting || isProxyURLEmpty)
                     if let proxyTestResult {
                         Text(proxyTestResult)
                             .font(.caption)
                             .foregroundStyle(proxyTestResult.hasPrefix("OK") ? Color.green : Color.red)
                     }
                 }
-                Text("Резолв ссылок и загрузка аудио идут одним маршрутом (напрямую или через прокси — что сработает первым, гонкой). Живые радио-потоки играются напрямую.")
+                Text("Резолв ссылок и загрузка аудио идут одним маршрутом. «Авто» — гонка прямого и прокси-подключения (что сработает первым); «Только прокси» — без прямых запросов; «Без прокси» — всегда напрямую.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -70,15 +79,49 @@ struct GeneralSettingsTab: View {
                     Text("Громкость")
                     Slider(value: $controller.volume, in: 0...1)
                         .frame(maxWidth: 260)
+                        .accessibilityLabel("Громкость")
                 }
             }
         }
         .formStyle(.grouped)
         .padding(14)
+        .onAppear {
+            proxy = ProxyConfig.load()
+        }
+    }
+
+    private var isProxyURLEmpty: Bool {
+        proxy.url.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private var proxyEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { !isProxyURLEmpty && proxy.enabled },
+            set: { proxy.enabled = $0; proxy.save() }
+        )
+    }
+
+    private var proxyURLBinding: Binding<String> {
+        Binding(
+            get: { proxy.url },
+            set: { proxy.url = $0; proxy.save() }
+        )
+    }
+
+    private var proxyModeBinding: Binding<String> {
+        Binding(
+            get: { proxy.mode.rawValue },
+            set: { newValue in
+                if let mode = ProxyConfig.Mode(rawValue: newValue) {
+                    proxy.mode = mode
+                    proxy.save()
+                }
+            }
+        )
     }
 
     private func testProxy() {
-        let candidate = proxyURL.trimmingCharacters(in: .whitespaces)
+        let candidate = proxy.url.trimmingCharacters(in: .whitespaces)
         guard let toolURL = ProxyConfig.toolURL(from: candidate) else {
             proxyTestResult = "Некорректный адрес"
             return
@@ -126,16 +169,16 @@ struct SessionSettingsTab: View {
         Form {
             Picker("Режим по умолчанию", selection: $controller.timerModeRaw) {
                 Text("Обратный отсчёт").tag(TimerEngine.Mode.countdown.rawValue)
-                Text("Помодоро").tag(TimerEngine.Mode.pomodoro.rawValue)
+                Text("Помодори").tag(TimerEngine.Mode.pomodoro.rawValue)
             }
             Picker("Длительность по умолчанию", selection: $controller.sessionMinutes) {
-                ForEach([5, 10, 15, 20, 25, 30, 45, 50, 60, 90, 120, 180, 480], id: \.self) { minutes in
+                ForEach(AppDefaults.allDurations, id: \.self) { minutes in
                     Text("\(Theme.shortDuration(minutes)) (\(minutes) мин)").tag(minutes)
                 }
             }
             if controller.timerMode == .pomodoro {
                 Picker("Перерыв", selection: $controller.breakMinutes) {
-                    ForEach([5, 10, 15], id: \.self) { minutes in
+                    ForEach(AppDefaults.breakChoices, id: \.self) { minutes in
                         Text("\(minutes) мин").tag(minutes)
                     }
                 }
