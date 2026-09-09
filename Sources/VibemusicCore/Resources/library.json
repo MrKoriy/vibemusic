@@ -1,0 +1,531 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "work",
+      "title": "Работа · Deep House & Melodic",
+      "mode": "focus",
+      "defaultMinutes": 50,
+      "tracks": [
+        {
+          "id": "u-PeF3SfY5w",
+          "title": "Lane 8 — Summer 2024 Mixtape",
+          "channel": "Lane 8",
+          "duration": 11110
+        },
+        {
+          "id": "ua-8b09pztk",
+          "title": "Lane 8 — Winter 2024 Mixtape",
+          "channel": "Lane 8",
+          "duration": 9721
+        },
+        {
+          "id": "AkZuqGvcLME",
+          "title": "Anjunadeep Radio • Live 24/7 (Deep House & Progressive)",
+          "channel": "Anjunadeep",
+          "duration": null
+        },
+        {
+          "id": "RvRhUHTV_8k",
+          "title": "Ben Böhmer live above Cappadocia in Turkey for Cercle",
+          "channel": "Cercle",
+          "duration": 5068
+        },
+        {
+          "id": "rYrs4gxCr0w",
+          "title": "Nora En Pure — Purified Radio",
+          "channel": "Nora En Pure",
+          "duration": 3648
+        },
+        {
+          "id": "MoyZRbodpWg",
+          "title": "Keinemusik (Adam Port) — Melodic House Set",
+          "channel": "HÖR Berlin",
+          "duration": 3253
+        },
+        {
+          "id": "rWIPn3x31aM",
+          "title": "Hozho — Chill Mix (Melodic Minimal Techno)",
+          "channel": "Hozho",
+          "duration": 3515
+        },
+        {
+          "id": "FIFN1zRTebs",
+          "title": "deadmau5 — Productivity Mix",
+          "channel": "Haldor Asheim",
+          "duration": 8562
+        }
+      ]
+    },
+    {
+      "id": "lofi",
+      "title": "Лоу-фай & Chillhop",
+      "mode": "focus",
+      "defaultMinutes": 50,
+      "tracks": [
+        {
+          "id": "rFZHOHl-L8A",
+          "title": "Lofi Girl — lofi hip hop radio (beats to relax/study)",
+          "channel": "Lofi Girl",
+          "duration": null
+        },
+        {
+          "id": "5yx6BWlEVcY",
+          "title": "Chillhop Radio — jazzy & lofi hip hop beats",
+          "channel": "Chillhop Music",
+          "duration": null
+        },
+        {
+          "id": "4xDzrJKXOOY",
+          "title": "Synthwave Radio — beats to chill/game to",
+          "channel": "Lofi Girl",
+          "duration": null
+        },
+        {
+          "id": "5JW_RnO13l8",
+          "title": "Rainy Tokyo Night Lofi — Chill Hip Hop Beats",
+          "channel": "Lofi Room",
+          "duration": 7613
+        },
+        {
+          "id": "Y9mRoCerrpY",
+          "title": "Cozy Library Coffee Shop Lofi — Deep Focus",
+          "channel": "Coffee Shop Vibes",
+          "duration": 11702
+        },
+        {
+          "id": "i43tkaTXtwI",
+          "title": "Best of Lofi Hip Hop 2022 — beats to relax/study to",
+          "channel": "Lofi Girl",
+          "duration": 11474
+        }
+      ]
+    },
+    {
+      "id": "classical",
+      "title": "Классика & Неоклассика",
+      "mode": "focus",
+      "defaultMinutes": 50,
+      "tracks": [
+        {
+          "id": "9uLaEGQ17W4",
+          "title": "Ludovico Einaudi — Greatest Relaxing Piano Pieces",
+          "channel": "Ludovico Einaudi",
+          "duration": 3850
+        },
+        {
+          "id": "goKm4DhvJto",
+          "title": "Max Richter — On the Nature of Daylight & Piano Works",
+          "channel": "Max Richter",
+          "duration": 7406
+        },
+        {
+          "id": "UETuJ2LXJWQ",
+          "title": "Claude Debussy — Clair de Lune & Best Piano Works",
+          "channel": "Classical Experience",
+          "duration": 4464
+        },
+        {
+          "id": "AnlKTlJLkro",
+          "title": "Classical Piano for Brain Power — Chopin, Debussy, Satie",
+          "channel": "HALIDONMUSIC",
+          "duration": 7734
+        },
+        {
+          "id": "WLWJy1eXX2c",
+          "title": "8 Hours Classical Piano — Chopin, Debussy, Mozart, Bach",
+          "channel": "HALIDONMUSIC",
+          "duration": 30231
+        },
+        {
+          "id": "2FydDzKecpI",
+          "title": "Classical Music for Working — Tchaikovsky, Chopin, Beethoven",
+          "channel": "HALIDONMUSIC",
+          "duration": 8705
+        }
+      ]
+    },
+    {
+      "id": "ambient",
+      "title": "Эмбиент & Саундтреки",
+      "mode": "focus",
+      "defaultMinutes": 50,
+      "tracks": [
+        {
+          "id": "vNwYtllyt3Q",
+          "title": "Brian Eno — Ambient 1: Music for Airports",
+          "channel": "Brian Eno",
+          "duration": 2919
+        },
+        {
+          "id": "pO00s3pwhM4",
+          "title": "Blade Runner 2049 — Atmospheric Synth Soundscape",
+          "channel": "Cinematic Ambience",
+          "duration": 3580
+        },
+        {
+          "id": "WHqbqzqeskw",
+          "title": "Interstellar Soundtrack — Deep Space Ambient",
+          "channel": "Hans Zimmer Ambience",
+          "duration": 3600
+        },
+        {
+          "id": "aKTlGo7QyK0",
+          "title": "Carbon Based Lifeforms — Ambient Chillout Electronic",
+          "channel": "Carbon Based Lifeforms",
+          "duration": 14715
+        },
+        {
+          "id": "4oY3v0jAWr4",
+          "title": "Deep Space • Ambient Focus & Floating Soundscape",
+          "channel": "Soothing Relaxation",
+          "duration": 10756
+        },
+        {
+          "id": "VIugokSxckE",
+          "title": "Plasma Shores — Soft Ambient Soundscape for Deep Focus",
+          "channel": "Chronoscapes",
+          "duration": 7462
+        }
+      ]
+    },
+    {
+      "id": "alpha",
+      "title": "Альфа · Спокойствие (10 Hz)",
+      "mode": "focus",
+      "defaultMinutes": 30,
+      "tracks": [
+        {
+          "id": "4_OTW6iALgQ",
+          "title": "Alpha Wave 2.0 | 100% Pure Alpha Frequency (8 Hours)",
+          "channel": "HQ Binaural Beats",
+          "duration": 28854
+        },
+        {
+          "id": "FsgnL-h4LUU",
+          "title": "Binaural Beat — 10 Hz Alpha Frequency Wave (Pure & Low)",
+          "channel": "HQ Binaural Beats",
+          "duration": 36001
+        },
+        {
+          "id": "j9cPpk-lVuU",
+          "title": "Alpha Wave [Isochronic 2.0] — 10 Hz Frequency",
+          "channel": "HQ Binaural Beats",
+          "duration": 28832
+        },
+        {
+          "id": "ZrGrYyScwjQ",
+          "title": "Alpha Wave Frequency — 100% Pure Binaural Beat",
+          "channel": "HQ Binaural Beats",
+          "duration": 5401
+        },
+        {
+          "id": "rHds4AAQSy4",
+          "title": "Isochronic Alpha — 100% Pure Alpha Wave",
+          "channel": "HQ Binaural Beats",
+          "duration": 5401
+        }
+      ]
+    },
+    {
+      "id": "beta",
+      "title": "Бета · Концентрация (14-20 Hz)",
+      "mode": "focus",
+      "defaultMinutes": 30,
+      "tracks": [
+        {
+          "id": "ky6cgI-J064",
+          "title": "Beta Wave 2.0 | Pure Beta Frequency (8 Hours)",
+          "channel": "HQ Binaural Beats",
+          "duration": 28854
+        },
+        {
+          "id": "VIpjfc9G66o",
+          "title": "Binaural Beat — 14 Hz Beta Frequency Wave (Pure & Low)",
+          "channel": "HQ Binaural Beats",
+          "duration": 36001
+        },
+        {
+          "id": "M-5xyizclPU",
+          "title": "Deep Concentration, Focus, and Thought | Binaural Beat",
+          "channel": "HQ Binaural Beats",
+          "duration": 5401
+        },
+        {
+          "id": "S5UyebpFcV0",
+          "title": "Isochronic Beta — 100% Pure Beta Frequency Wave",
+          "channel": "HQ Binaural Beats",
+          "duration": 5401
+        }
+      ]
+    },
+    {
+      "id": "gamma",
+      "title": "Гамма · Пиковый фокус (40 Hz)",
+      "mode": "focus",
+      "defaultMinutes": 30,
+      "tracks": [
+        {
+          "id": "QSXqkWAFmxA",
+          "title": "Gamma Wave 2.0 | Pure Gamma Frequency (8 Hours)",
+          "channel": "HQ Binaural Beats",
+          "duration": 29036
+        },
+        {
+          "id": "POI5ZNWkDdc",
+          "title": "Gamma Wave [Isochronic 2.0] — 40 Hz Gamma Frequency",
+          "channel": "HQ Binaural Beats",
+          "duration": 28832
+        },
+        {
+          "id": "EVPLIZotdrg",
+          "title": "Binaural Beat — Gamma Wave | 100% Pure Gamma Frequency",
+          "channel": "HQ Binaural Beats",
+          "duration": 5406
+        },
+        {
+          "id": "FAcF5Azs2Ps",
+          "title": "Binaural Infusion: Theta & Gamma Blended Frequency Waves",
+          "channel": "HQ Binaural Beats",
+          "duration": 3631
+        },
+        {
+          "id": "Iw_MxQJVaQM",
+          "title": "Isochronic Gamma — 100% Pure Gamma Frequency Wave",
+          "channel": "HQ Binaural Beats",
+          "duration": 5401
+        }
+      ]
+    },
+    {
+      "id": "binaural",
+      "title": "Тета & Бинауральные биты",
+      "mode": "focus",
+      "defaultMinutes": 30,
+      "tracks": [
+        {
+          "id": "tcw4GsSAmso",
+          "title": "Theta Wave 2.0 | Pure Theta Frequency (8 Hours)",
+          "channel": "HQ Binaural Beats",
+          "duration": 28982
+        },
+        {
+          "id": "17brANtd8Jo",
+          "title": "Binaural Beat — 6 Hz Theta Frequency Wave (Low & Pure)",
+          "channel": "HQ Binaural Beats",
+          "duration": 36032
+        },
+        {
+          "id": "5Z0b8D8-JTE",
+          "title": "Pure Brainwave Sequence: Gamma, Beta, Alpha, Theta, and Delta",
+          "channel": "HQ Binaural Beats",
+          "duration": 18001
+        },
+        {
+          "id": "UeF8KWk9yIQ",
+          "title": "Theta Wave + Brown Noise = Smooth & Relaxing Mix",
+          "channel": "HQ Binaural Beats",
+          "duration": 11012
+        },
+        {
+          "id": "7TectlS3B54",
+          "title": "All Brainwaves: Theta, Gamma, Alpha, Delta, and Beta Blended",
+          "channel": "HQ Binaural Beats",
+          "duration": 3678
+        },
+        {
+          "id": "49VBHJJzrpw",
+          "title": "Isochronic Theta — 100% Pure Theta Frequency Wave",
+          "channel": "HQ Binaural Beats",
+          "duration": 5401
+        }
+      ]
+    },
+    {
+      "id": "meditation",
+      "title": "Медитация · Дзен-сад",
+      "mode": "meditate",
+      "defaultMinutes": 15,
+      "tracks": [
+        {
+          "id": "M538uAyKncQ",
+          "title": "Shakuhachi Meditation Music: Zen Garden",
+          "channel": "Zen Meditation",
+          "duration": 7413
+        },
+        {
+          "id": "vxHVbzixHHI",
+          "title": "Tibetan Singing Bowls with Flowing Water",
+          "channel": "Healing Vibrations",
+          "duration": 5542
+        },
+        {
+          "id": "QUu3jv3REZ4",
+          "title": "Bamboo Water Sounds & Calm Zen Melodies",
+          "channel": "Nature Soundscape",
+          "duration": 5945
+        },
+        {
+          "id": "C20oIk-APRc",
+          "title": "Zen Flute Dreams — Peaceful Meditation",
+          "channel": "Buddha Tribe",
+          "duration": 10830
+        }
+      ]
+    },
+    {
+      "id": "frequencies",
+      "title": "Частоты & Звукотерапия",
+      "mode": "meditate",
+      "defaultMinutes": 30,
+      "tracks": [
+        {
+          "id": "f_FgjELreaQ",
+          "title": "428 Hz High Frequency Binaural Beat + Low Tone Brainwave",
+          "channel": "HQ Binaural Beats",
+          "duration": 12631
+        },
+        {
+          "id": "3cIVLRK9qRQ",
+          "title": "Brown Noise [Unfiltered Smooth Sound] (8 Hours)",
+          "channel": "HQ Binaural Beats",
+          "duration": 29036
+        },
+        {
+          "id": "xVALI1PcwHQ",
+          "title": "Pink Noise [Black Screen] — Smoothed Sound Therapy (8 Hours)",
+          "channel": "HQ Binaural Beats",
+          "duration": 29124
+        },
+        {
+          "id": "W_qgfEiMyIE",
+          "title": "Binaural Beat — Deep Meditation & Chakra Alignment",
+          "channel": "HQ Binaural Beats",
+          "duration": 1801
+        }
+      ]
+    },
+    {
+      "id": "schumann",
+      "title": "Резонанс Земли · Атмосфера",
+      "mode": "meditate",
+      "defaultMinutes": 30,
+      "tracks": [
+        {
+          "id": "FShyaVnZC7M",
+          "title": "Earths Aura — Ethereal Ambient Nature Soundscape",
+          "channel": "Meditative Mind",
+          "duration": 12813
+        },
+        {
+          "id": "4oY3v0jAWr4",
+          "title": "Deep Planetary Ambient Soundscape",
+          "channel": "Soothing Relaxation",
+          "duration": 10756
+        },
+        {
+          "id": "QUu3jv3REZ4",
+          "title": "Bamboo Water Garden & Forest Ambience",
+          "channel": "Nature Soundscape",
+          "duration": 5945
+        }
+      ]
+    },
+    {
+      "id": "manifest",
+      "title": "Вдохновение · Светлый эмбиент",
+      "mode": "meditate",
+      "defaultMinutes": 15,
+      "tracks": [
+        {
+          "id": "KxaZNW_4-hY",
+          "title": "Peaceful Light & Positive Ambient Instrumental",
+          "channel": "Calm Positivity",
+          "duration": 3622
+        },
+        {
+          "id": "ClBErdk0PsU",
+          "title": "Positive Energy — Warm Sunshine Vibes",
+          "channel": "Chill House Sunset",
+          "duration": 4341
+        },
+        {
+          "id": "8UjJBh_GO2k",
+          "title": "Soft Inspiring Acoustic Guitar & Morning Calm",
+          "channel": "Indie Folk Chill",
+          "duration": 9777
+        }
+      ]
+    },
+    {
+      "id": "sleep",
+      "title": "Сон · Дождь & Дельта",
+      "mode": "sleep",
+      "defaultMinutes": 480,
+      "tracks": [
+        {
+          "id": "2AKewgViF9s",
+          "title": "Delta Wave 2.0 | Pure Delta Frequency [8 Hours]",
+          "channel": "HQ Binaural Beats",
+          "duration": 29011
+        },
+        {
+          "id": "3DCRTyPD7X8",
+          "title": "Welcome Sleep with Heavy Rain & Deep Theta [8 Hours]",
+          "channel": "HQ Binaural Beats",
+          "duration": 28854
+        },
+        {
+          "id": "qYnA9wWFHLI",
+          "title": "Marconi Union — Weightless (10 Hour Version)",
+          "channel": "Marconi Union",
+          "duration": 36385
+        },
+        {
+          "id": "SMN3-m04M_M",
+          "title": "Binaural Beat — 3.2 Hz Delta Frequency Wave (Pure & Low)",
+          "channel": "HQ Binaural Beats",
+          "duration": 36032
+        },
+        {
+          "id": "42M3esYyHdw",
+          "title": "Gentle Night Rain on Window (Pure Rain Sound)",
+          "channel": "Rainy Night Chill",
+          "duration": null
+        }
+      ]
+    },
+    {
+      "id": "morning",
+      "title": "Утро · Солнце & Кофе",
+      "mode": "wake",
+      "defaultMinutes": 15,
+      "tracks": [
+        {
+          "id": "8UjJBh_GO2k",
+          "title": "Acoustic Chill — Soft Indie Folk Coffee Morning",
+          "channel": "Indie Folk Chill",
+          "duration": 9777
+        },
+        {
+          "id": "1uQJ8XbmLeA",
+          "title": "Beach Cafe Bossa Nova Jazz & Ocean Waves",
+          "channel": "Bossa Nova Cafe",
+          "duration": 8642
+        },
+        {
+          "id": "ClBErdk0PsU",
+          "title": "Positive Energy — Sunny Chill House & Morning Grooves",
+          "channel": "Chill House Sunset",
+          "duration": 4341
+        },
+        {
+          "id": "337OKHV3BRI",
+          "title": "Morning Coffee Lofi Beats & Sunny Wake Up",
+          "channel": "Coffee & Chill",
+          "duration": 12079
+        }
+      ]
+    }
+  ]
+}

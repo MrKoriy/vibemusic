@@ -1,0 +1,19 @@
+# Сборка
+.build/
+build/
+*.o
+*.lock
+
+# Xcode
+*.xcodeproj
+xcuserdata/
+*.xcuserstate
+*.xcworkspace
+
+# macOS
+.DS_Store
+com.apple.provenance
+
+# IDE
+.idea/
+.vscode/
