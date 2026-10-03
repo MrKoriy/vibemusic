@@ -1,5 +1,6 @@
 APP = build/Vibemusic.app
 BINARY = .build/release/Vibemusic
+BUNDLE = .build/release/Vibemusic_VibemusicCore.bundle
 YTDLP = build/yt-dlp
 YTDLP_VERSION_FILE = Scripts/yt-dlp.version
 STAGE_DIR = $(HOME)/Library/Caches/Vibemusic
@@ -64,6 +65,7 @@ app: $(YTDLP)
 	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $$v" $(STAGE_APP)/Contents/Info.plist
 	cp build/AppIcon.icns $(STAGE_APP)/Contents/Resources/AppIcon.icns
 	cp $(YTDLP) $(STAGE_APP)/Contents/Helpers/yt-dlp
+	@if [ -d "$(BUNDLE)" ]; then cp -R $(BUNDLE) $(STAGE_APP)/Contents/Resources/; else echo "WARN: $(BUNDLE) not found — library.json будет недоступен" >&2; fi
 	xattr -cr $(STAGE_APP) 2>/dev/null || true
 	codesign --force --sign - $(STAGE_APP)/Contents/Helpers/yt-dlp
 	codesign --force --sign - $(STAGE_APP)

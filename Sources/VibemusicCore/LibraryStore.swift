@@ -44,8 +44,8 @@ public final class LibraryStore: ObservableObject {
     public private(set) var curatedLoadError: String?
 
     private static func loadCurated() -> (categories: [MusicCategory], error: String?) {
-        guard let url = Bundle.module.url(forResource: "library", withExtension: "json") else {
-            return ([], "Библиотека не найдена в bundle")
+        guard let url = curatedLibraryURL() else {
+            return ([], "Библиотека не найдена в bundle (Vibemusic_VibemusicCore.bundle отсутствует)")
         }
         guard let data = try? Data(contentsOf: url) else {
             return ([], "Не удалось прочитать библиотеку")
@@ -56,6 +56,42 @@ public final class LibraryStore: ObservableObject {
         } catch {
             return ([], "Библиотека повреждена: \(error.localizedDescription)")
         }
+    }
+
+    /// Безопасная замена Bundle.module: тот крэшит fatalError если .bundle не найден
+    /// (см. Translated Report: NSBundle.module + LibraryStore.loadCurated -> SIGTRAP).
+    /// Повторяем кандидаты из сгенерированного resource_bundle_accessor.swift, но возвращаем nil.
+    private static func curatedLibraryURL() -> URL? {
+        let bundleName = "Vibemusic_VibemusicCore"
+        let fm = FileManager.default
+        var overrideURLs: [URL] = []
+        if let p = ProcessInfo.processInfo.environment["PACKAGE_RESOURCE_BUNDLE_PATH"] ??
+                  ProcessInfo.processInfo.environment["PACKAGE_RESOURCE_BUNDLE_URL"] {
+            overrideURLs.append(URL(fileURLWithPath: p))
+            // Если путь указывает прямо на .bundle — пробуем его содержимое
+            if p.hasSuffix(".bundle"), let b = Bundle(url: URL(fileURLWithPath: p)),
+               let u = b.url(forResource: "library", withExtension: "json") { return u }
+            let direct = URL(fileURLWithPath: p).appendingPathComponent("library.json")
+            if fm.fileExists(atPath: direct.path) { return direct }
+        }
+        let candidates: [URL?] = overrideURLs + [
+            Bundle.main.resourceURL,
+            Bundle(for: LibraryStore.self).resourceURL,
+            Bundle.main.bundleURL,
+        ]
+        for cand in candidates {
+            guard let c = cand else { continue }
+            let bundleURL = c.appendingPathComponent(bundleName + ".bundle")
+            if fm.fileExists(atPath: bundleURL.path), let b = Bundle(url: bundleURL),
+               let u = b.url(forResource: "library", withExtension: "json") { return u }
+            // На случай если library.json положили прямо в Resources без .bundle (fallback)
+            let direct = c.appendingPathComponent("library.json")
+            if fm.fileExists(atPath: direct.path) { return direct }
+        }
+        // Последние попытки — напрямую через Bundle API (покрывает swift test)
+        if let u = Bundle(for: LibraryStore.self).url(forResource: "library", withExtension: "json") { return u }
+        if let u = Bundle.main.url(forResource: "library", withExtension: "json") { return u }
+        return nil
     }
 
     private var userFileURL: URL {
