@@ -74,10 +74,16 @@ public final class LibraryStore: ObservableObject {
             let direct = URL(fileURLWithPath: p).appendingPathComponent("library.json")
             if fm.fileExists(atPath: direct.path) { return direct }
         }
+        let codeBundle = Bundle(for: LibraryStore.self)
         let candidates: [URL?] = overrideURLs + [
             Bundle.main.resourceURL,
-            Bundle(for: LibraryStore.self).resourceURL,
+            codeBundle.resourceURL,
             Bundle.main.bundleURL,
+            // `swift test`: ресурсный .bundle лежит рядом с .xctest
+            // (.build/<config>/), а не внутри него.
+            codeBundle.bundleURL.deletingLastPathComponent(),
+            // CLI-запуск бинарника из .build/<config>/ по симлинку или из другой папки.
+            Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent(),
         ]
         for cand in candidates {
             guard let c = cand else { continue }

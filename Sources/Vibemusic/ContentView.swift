@@ -248,7 +248,7 @@ struct ContentView: View {
         HStack(spacing: 10) {
             HStack(spacing: 2) {
                 modeButton("Отсчёт", value: .countdown)
-                modeButton("Помодори", value: .pomodoro)
+                modeButton("Помодоро", value: .pomodoro)
             }
             .liquidGlass(in: Capsule())
 

@@ -46,10 +46,31 @@ public struct ProxyConfig: Equatable, Sendable {
         }
     }
 
-    public static func load(defaults: UserDefaults = .standard) -> ProxyConfig {
+    /// Где лежит адрес прокси (в нём логин и пароль): для стандартных
+    /// UserDefaults — связка ключей macOS, для остальных (тесты) — сами defaults.
+    static func secretStore(for defaults: UserDefaults, override: SecretStore?) -> SecretStore {
+        if let override { return override }
+        return defaults === UserDefaults.standard
+            ? KeychainSecretStore.shared
+            : DefaultsSecretStore(defaults: defaults)
+    }
+
+    /// Переносит адрес прокси из UserDefaults (открытый plist) в хранилище
+    /// секретов. Если запись не удалась — значение остаётся в defaults.
+    static func migrateURLToSecrets(defaults: UserDefaults, secrets: SecretStore) {
+        guard !(secrets is DefaultsSecretStore),
+              let plain = defaults.string(forKey: urlKey) else { return }
+        if secrets.write(plain, for: urlKey) {
+            defaults.removeObject(forKey: urlKey)
+        }
+    }
+
+    public static func load(defaults: UserDefaults = .standard, secrets: SecretStore? = nil) -> ProxyConfig {
+        let store = secretStore(for: defaults, override: secrets)
         migrateLegacyKeys(defaults: defaults)
+        migrateURLToSecrets(defaults: defaults, secrets: store)
         let enabled = defaults.object(forKey: enabledKey) as? Bool ?? true
-        let url = defaults.string(forKey: urlKey) ?? embeddedDefaultURL
+        let url = store.read(urlKey) ?? defaults.string(forKey: urlKey) ?? embeddedDefaultURL
         let mode = defaults.string(forKey: modeKey).flatMap(Mode.init(rawValue:)) ?? .auto
         var config = ProxyConfig(enabled: enabled, url: url, mode: mode)
         // Пустой или невалидный URL означает, что прокси фактически не работает.
@@ -59,10 +80,18 @@ public struct ProxyConfig: Equatable, Sendable {
         return config
     }
 
-    public func save(defaults: UserDefaults = .standard) {
+    public func save(defaults: UserDefaults = .standard, secrets: SecretStore? = nil) {
+        let store = Self.secretStore(for: defaults, override: secrets)
         defaults.set(enabled, forKey: Self.enabledKey)
-        defaults.set(url, forKey: Self.urlKey)
         defaults.set(mode.rawValue, forKey: Self.modeKey)
+        if store is DefaultsSecretStore {
+            defaults.set(url, forKey: Self.urlKey)
+        } else if store.write(url, for: Self.urlKey) {
+            defaults.removeObject(forKey: Self.urlKey)
+        } else {
+            // Связка ключей недоступна — не теряем настройку.
+            defaults.set(url, forKey: Self.urlKey)
+        }
     }
 
     /// URL для yt-dlp/curl: socks5:// → socks5h:// (DNS резолвим через прокси).

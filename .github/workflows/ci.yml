@@ -11,21 +11,46 @@ jobs:
     name: Tests, release build, library lint
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode 26
+        run: |
+          # Liquid Glass (glassEffect) есть только в SDK macOS 26 — берём самый свежий Xcode 26.
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$XCODE" ]; then
+            sudo xcode-select -s "$XCODE/Contents/Developer"
+            echo "Using $XCODE"
+          else
+            # Не валим CI: Glass.swift собирается и на Xcode 16 (фолбэк без Liquid Glass).
+            echo "::warning::Xcode 26 не найден, сборка на дефолтном Xcode. Доступно: $(ls -d /Applications/Xcode*.app | xargs)"
+          fi
+          swift --version
 
       - name: Cache SwiftPM build
         uses: actions/cache@v4
         with:
           path: .build
-          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: swiftpm-xcode26-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-
+            swiftpm-xcode26-${{ runner.os }}-
 
       - name: Run tests
-        run: swift test
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee test.log || {
+            # Ошибки компиляции/тестов — в аннотации, чтобы их было видно без доступа к логам.
+            grep -E "error:|failed|✘" test.log | head -n 40 | sed 's/^/::error::/'
+            exit 1
+          }
 
       - name: Release build
-        run: swift build -c release
+        run: |
+          set -o pipefail
+          swift build -c release 2>&1 | tee build.log || {
+            # Ошибки компиляции/тестов — в аннотации, чтобы их было видно без доступа к логам.
+            grep -E "error:|failed|✘" build.log | head -n 40 | sed 's/^/::error::/'
+            exit 1
+          }
 
       - name: Lint Info.plist
         run: plutil -lint App/Info.plist
@@ -38,15 +63,28 @@ jobs:
     runs-on: macos-15
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode 26
+        run: |
+          # Liquid Glass (glassEffect) есть только в SDK macOS 26 — берём самый свежий Xcode 26.
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$XCODE" ]; then
+            sudo xcode-select -s "$XCODE/Contents/Developer"
+            echo "Using $XCODE"
+          else
+            # Не валим CI: Glass.swift собирается и на Xcode 16 (фолбэк без Liquid Glass).
+            echo "::warning::Xcode 26 не найден, сборка на дефолтном Xcode. Доступно: $(ls -d /Applications/Xcode*.app | xargs)"
+          fi
+          swift --version
 
       - name: Cache SwiftPM build
         uses: actions/cache@v4
         with:
           path: .build
-          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: swiftpm-xcode26-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-
+            swiftpm-xcode26-${{ runner.os }}-
 
       - name: Cache yt-dlp binary
         uses: actions/cache@v4
@@ -55,4 +93,10 @@ jobs:
           key: ytdlp-${{ hashFiles('Scripts/yt-dlp.version') }}
 
       - name: Bundle app
-        run: make app
+        run: |
+          set -o pipefail
+          make app 2>&1 | tee app.log || {
+            # Ошибки компиляции/тестов — в аннотации, чтобы их было видно без доступа к логам.
+            grep -E "error:|failed|✘" app.log | head -n 40 | sed 's/^/::error::/'
+            exit 1
+          }

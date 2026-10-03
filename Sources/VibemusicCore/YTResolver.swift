@@ -6,17 +6,20 @@ public enum ResolverError: LocalizedError {
     case failed(String)
     case noStream
     case nothingImported
+    case unsupportedSource
 
     public var errorDescription: String? {
         switch self {
         case .ytDlpMissing:
-            return "yt-dlp не найден. Установите: brew install yt-dlp"
+            return "yt-dlp не найден. Переустановите приложение (make install) или установите: brew install yt-dlp"
         case .failed(let message):
             return "yt-dlp: \(message)"
         case .noStream:
             return "Не удалось получить аудиопоток. Попробуйте другой трек."
         case .nothingImported:
             return "По этой ссылке ничего не найдено."
+        case .unsupportedSource:
+            return "Поддерживаются только ссылки YouTube (youtube.com, youtu.be) или ID видео."
         }
     }
 }
@@ -69,8 +72,54 @@ public enum YTResolver {
         return nil
     }
 
-    private static func run(_ arguments: [String], timeout: TimeInterval) throws -> String {
+    /// Содержимое конфига yt-dlp с прокси. Логин/пароль прокси не должны
+    /// попадать в argv: его видит любой локальный пользователь через `ps`.
+    /// yt-dlp разбирает конфиг через shlex — значение в одинарных кавычках.
+    /// nil — если в URL есть перевод строки или NUL (такой URL не пропускаем).
+    static func proxyConfigContents(proxy: String) -> String? {
+        guard !proxy.isEmpty,
+              proxy.rangeOfCharacter(from: CharacterSet(charactersIn: "\n\r\u{0}")) == nil else { return nil }
+        let quoted = "'" + proxy.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        return "--proxy \(quoted)\n"
+    }
+
+    /// Пишет конфиг с прокси в приватную временную папку (0700/0600).
+    private static func writeProxyConfig(_ proxy: String) throws -> URL {
+        guard let contents = proxyConfigContents(proxy: proxy) else {
+            throw ResolverError.failed("Некорректный адрес прокси")
+        }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vibemusic-ytdlp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let file = dir.appendingPathComponent("proxy.conf")
+        guard FileManager.default.createFile(
+            atPath: file.path,
+            contents: Data(contents.utf8),
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            try? FileManager.default.removeItem(at: dir)
+            throw ResolverError.failed("Не удалось подготовить конфиг прокси")
+        }
+        return dir
+    }
+
+    private static func run(_ arguments: [String], timeout: TimeInterval, proxy: String? = nil) throws -> String {
         guard let path = ytDlpPath() else { throw ResolverError.ytDlpMissing }
+        var arguments = arguments
+        var proxyDir: URL?
+        if let proxy {
+            let dir = try writeProxyConfig(proxy)
+            proxyDir = dir
+            // Опции должны идти до `--`, поэтому вставляем конфиг в начало.
+            arguments.insert(contentsOf: ["--config-locations", dir.appendingPathComponent("proxy.conf").path], at: 0)
+        }
+        defer {
+            if let proxyDir { try? FileManager.default.removeItem(at: proxyDir) }
+        }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: path)
         task.arguments = arguments
@@ -138,15 +187,20 @@ public enum YTResolver {
     }
 
     public static func streamURL(for videoID: String, proxy: String? = nil) throws -> URL {
+        // Только ID видео или ссылка YouTube: строка вида `--exec=…` не должна
+        // превратиться в опцию yt-dlp (защита от подстановки аргументов).
+        let target = try sanitizedSource(videoID)
         var arguments = [
             "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]/bestaudio[protocol^=m3u8]",
             "-g", "--no-warnings", "--no-playlist",
         ]
-        if let proxy {
-            arguments += ["--proxy", proxy, "--socket-timeout", "30", "--retries", "2"]
+        if proxy != nil {
+            // Сам прокси передаётся через --config-locations (см. run), не в argv.
+            arguments += ["--socket-timeout", "30", "--retries", "2"]
         }
-        arguments.append(videoID)
-        let output = try run(arguments, timeout: 50)
+        // `--` — конец опций: дальше yt-dlp трактует аргумент только как URL/ID.
+        arguments += ["--", target]
+        let output = try run(arguments, timeout: 50, proxy: proxy)
         guard let line = output.split(separator: "\n").first(where: { !$0.isEmpty }),
               let url = URL(string: String(line)) else {
             throw ResolverError.noStream
@@ -250,7 +304,7 @@ public enum YTResolver {
     }
 
     public static func importTracks(from raw: String, proxy: String? = nil, playlist: Bool? = nil) throws -> [Track] {
-        let argument = normalize(raw)
+        let argument = try sanitizedSource(raw)
         let isPlaylist = playlist ?? raw.contains("list=")
         var arguments: [String]
         if isPlaylist {
@@ -258,11 +312,12 @@ public enum YTResolver {
         } else {
             arguments = ["-J", "--skip-download", "--no-playlist"]
         }
-        if let proxy {
-            arguments += ["--proxy", proxy, "--socket-timeout", "30", "--retries", "2"]
+        if proxy != nil {
+            // Сам прокси передаётся через --config-locations (см. run), не в argv.
+            arguments += ["--socket-timeout", "30", "--retries", "2"]
         }
-        arguments.append(argument)
-        let output = try run(arguments, timeout: 120)
+        arguments += ["--", argument]
+        let output = try run(arguments, timeout: 120, proxy: proxy)
         guard let data = output.data(using: .utf8),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw ResolverError.nothingImported
@@ -288,10 +343,31 @@ public enum YTResolver {
         return [Track(id: id, title: title, channel: channel, duration: duration)]
     }
 
-    private static func normalize(_ raw: String) -> String {
+    /// Хосты, ссылки с которых разрешено передавать в yt-dlp.
+    static let allowedHosts: Set<String> = [
+        "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+        "youtu.be", "www.youtube-nocookie.com", "youtube-nocookie.com",
+    ]
+
+    static func isVideoID(_ value: String) -> Bool {
+        value.count == 11 && value.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
+    }
+
+    /// Приводит пользовательский ввод к безопасному аргументу yt-dlp:
+    /// ID видео → полная ссылка; https-ссылка YouTube → как есть; иначе — ошибка.
+    /// Ничто, начинающееся с «-», сюда не проходит.
+    static func sanitizedSource(_ raw: String) throws -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.count == 11, trimmed.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil {
+        if isVideoID(trimmed) {
             return "https://www.youtube.com/watch?v=" + trimmed
+        }
+        guard !trimmed.hasPrefix("-"),
+              let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host?.lowercased(),
+              allowedHosts.contains(host) else {
+            throw ResolverError.unsupportedSource
         }
         return trimmed
     }

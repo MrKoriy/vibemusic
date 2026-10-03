@@ -42,6 +42,10 @@ public final class PlayerCore: ObservableObject {
     private nonisolated(unsafe) var fadeTimer: Timer?
     private var activeStream: LocalStream?
     private var playbackGeneration = UUID()
+    /// Неудачи загрузки подряд. Не даёт autoNext крутить очередь по кругу
+    /// бесконечно (и каждые 1,5 с запускать yt-dlp), когда не играет ничего.
+    private var consecutiveFailures = 0
+    static let maxConsecutiveFailures = 5
 
     public init() {
         player.volume = volume
@@ -54,6 +58,7 @@ public final class PlayerCore: ObservableObject {
                 MainActor.assumeIsolated {
                     self.isPlaying = (status == .playing)
                     if self.isPlaying {
+                        self.consecutiveFailures = 0
                         self.stallTask?.cancel()
                         self.stallTask = nil
                     }
@@ -110,6 +115,7 @@ public final class PlayerCore: ObservableObject {
             return
         }
         cancelPlayback()
+        consecutiveFailures = 0
         queue = shuffle ? category.tracks.shuffled() : category.tracks
         index = 0
         loadCurrent()
@@ -134,6 +140,7 @@ public final class PlayerCore: ObservableObject {
         guard !queue.isEmpty else { return }
         logger.info("retry запрошен")
         needsRetry = false
+        consecutiveFailures = 0
         cancelPlayback()
         loadCurrent()
     }
@@ -268,8 +275,15 @@ public final class PlayerCore: ObservableObject {
                     // Качка тем же маршрутом, что и резолв: googlevideo
                     // привязывает ссылку к IP запросившего.
                     let streamProxy = raced.1 ? proxyTool : nil
+                    // Когда ссылка истечёт посреди многочасового трека,
+                    // стрим сам получит новую тем же маршрутом.
+                    let refresher: LocalStream.UpstreamRefresher = {
+                        try await Task.detached(priority: .userInitiated) {
+                            try YTResolver.streamURL(for: expectedID, proxy: streamProxy)
+                        }.value
+                    }
                     let stream = try await Task.detached(priority: .userInitiated) {
-                        try StreamHub.shared.openStream(upstream: raced.0, proxy: streamProxy)
+                        try StreamHub.shared.openStream(upstream: raced.0, proxy: streamProxy, refresher: refresher)
                     }.value
                     guard !Task.isCancelled,
                           generation == self.playbackGeneration,
@@ -335,6 +349,15 @@ public final class PlayerCore: ObservableObject {
             // не гоняем autoNext по всей библиотеке.
             logger.warning("медленный фейл резолва — сеть")
             statusText = "YouTube недоступен — проверьте сеть и попробуйте ещё раз"
+            needsRetry = true
+            return
+        }
+        consecutiveFailures += 1
+        // Предел: вся очередь + ещё одна попытка, но не больше maxConsecutiveFailures.
+        let limit = min(Self.maxConsecutiveFailures, queue.count + 1)
+        if queue.count > 1, consecutiveFailures >= limit {
+            logger.warning("подряд \(self.consecutiveFailures) неудач — останавливаю autoNext")
+            statusText = "Треки не загружаются — проверьте сеть и нажмите ↻"
             needsRetry = true
             return
         }
