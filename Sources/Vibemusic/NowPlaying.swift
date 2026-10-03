@@ -119,20 +119,27 @@ final class NowPlayingManager: @unchecked Sendable {
 
     /// Обложка без сети (E-11): вертикальный градиент цвета категории
     /// (Theme.color) + крупный белый SF-символ режима (Theme.symbol), 512×512.
+    /// Крэш-фикс: MPMediaItemArtwork вызывает handler на `accessQueue` (не main).
+    /// Если handler замкнут на @MainActor-контекст, Swift Concurrency ловит
+    /// dispatch_assert_queue / _swift_task_checkIsolated -> SIGTRAP.
+    /// Поэтому рендер — на MainActor, а обёртка в MPMediaItemArtwork — nonisolated.
     private static func makeArtwork(categoryID: String) -> MPMediaItemArtwork? {
+        let image = renderArtworkImage(categoryID: categoryID)
+        let size = image.size
+        return wrapArtwork(image: image, size: size)
+    }
+
+    private static func renderArtworkImage(categoryID: String) -> NSImage {
         let side: CGFloat = 512
         let bounds = NSRect(x: 0, y: 0, width: side, height: side)
         let image = NSImage(size: bounds.size)
-
         let base = Theme.nsColor(for: categoryID).usingColorSpace(.sRGB) ?? .systemBlue
         let top = base.blended(withFraction: 0.30, of: .black) ?? base
         let bottom = base.blended(withFraction: 0.70, of: .black) ?? base
-        guard let gradient = NSGradient(colors: [top, bottom]) else { return nil }
-
+        guard let gradient = NSGradient(colors: [top, bottom]) else { return image }
         let symbol = NSImage(systemSymbolName: Theme.symbol(for: categoryID), accessibilityDescription: nil)
             ?? NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
         let configured = symbol?.withSymbolConfiguration(.init(pointSize: 230, weight: .bold))
-
         image.lockFocus()
         gradient.draw(in: bounds, angle: -90)
         if let configured, let ctx = NSGraphicsContext.current?.cgContext {
@@ -142,8 +149,6 @@ final class NowPlayingManager: @unchecked Sendable {
                 width: configured.size.width,
                 height: configured.size.height
             )
-            // Template-символ рисуется чёрным независимо от текущего цвета,
-            // поэтому тонируем через маску: clip(alpha) + заливка белым.
             if let mask = configured.cgImage(forProposedRect: &symbolRect, context: nil, hints: nil) {
                 ctx.saveGState()
                 ctx.clip(to: symbolRect, mask: mask)
@@ -153,6 +158,11 @@ final class NowPlayingManager: @unchecked Sendable {
             }
         }
         image.unlockFocus()
-        return MPMediaItemArtwork(boundsSize: bounds.size) { _ in image }
+        return image
+    }
+
+    nonisolated private static func wrapArtwork(image: NSImage, size: NSSize) -> MPMediaItemArtwork {
+        let captured = image
+        return MPMediaItemArtwork(boundsSize: size) { @Sendable _ in captured }
     }
 }

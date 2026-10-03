@@ -112,13 +112,20 @@ final class MenuBarController: NSObject {
 
     private func refresh() {
         guard let controller, let player else { return }
+        // Snapshot таймера на MainActor без повторного обращения к Published из Combine-транзишена.
+        // Прямое чтение Published-полей @MainActor-объекта из Combine-closure может
+        // вызвать swift_getGenericMetadata рекурсию (см. креш-репорт thread 0).
         let timerEngine = controller.timer
+        let phase = timerEngine.phase
+        let isPaused = timerEngine.isPaused
+        let remaining = timerEngine.remaining
+        let completedCycles = timerEngine.completedCycles
 
         // Title статус-бара: остаток таймера или иконка.
-        if timerEngine.phase == .work || timerEngine.phase == .breakPhase {
-            let pauseMark = timerEngine.isPaused ? "⏸ " : ""
+        if phase == .work || phase == .breakPhase {
+            let pauseMark = isPaused ? "⏸ " : ""
             statusItem?.button?.image = nil
-            statusItem?.button?.title = pauseMark + Theme.timeString(timerEngine.remaining)
+            statusItem?.button?.title = pauseMark + Theme.timeString(remaining)
         } else {
             statusItem?.button?.title = ""
             statusItem?.button?.image = NSImage(
@@ -127,11 +134,11 @@ final class MenuBarController: NSObject {
             )
         }
 
-        items["status"]?.title = statusLine()
+        items["status"]?.title = statusLine(phase: phase, remaining: remaining, completedCycles: completedCycles)
 
-        let isRunning = timerEngine.phase == .work || timerEngine.phase == .breakPhase
+        let isRunning = phase == .work || phase == .breakPhase
         items["toggle"]?.title = isRunning
-            ? (timerEngine.isPaused ? "Возобновить" : "Пауза")
+            ? (isPaused ? "Возобновить" : "Пауза")
             : "Начать сессию"
 
         let trackTitle = player.current?.title ?? ""
@@ -145,16 +152,15 @@ final class MenuBarController: NSObject {
             : "Сегодня: —"
     }
 
-    private func statusLine() -> String {
+    private func statusLine(phase: TimerEngine.Phase, remaining: TimeInterval, completedCycles: Int) -> String {
         guard let controller, let player else { return "Vibemusic" }
-        let timerEngine = controller.timer
-        if timerEngine.phase == .work || timerEngine.phase == .breakPhase {
-            let phaseName = timerEngine.phase == .breakPhase
+        if phase == .work || phase == .breakPhase {
+            let phaseName = phase == .breakPhase
                 ? "Перерыв"
                 : phaseName(for: controller.selectedCategory?.mode)
-            var line = "\(phaseName): осталось \(Theme.timeString(timerEngine.remaining))"
-            if controller.timerMode == .pomodoro, timerEngine.completedCycles > 0 {
-                line += " · циклов: \(timerEngine.completedCycles)"
+            var line = "\(phaseName): осталось \(Theme.timeString(remaining))"
+            if controller.timerMode == .pomodoro, completedCycles > 0 {
+                line += " · циклов: \(completedCycles)"
             }
             return line
         }
