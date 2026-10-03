@@ -10,6 +10,9 @@ extension View {
         glare: Bool = true
     ) -> some View {
         Group {
+            // glassEffect есть только в SDK macOS 26 (Xcode 26 / Swift 6.2).
+            // На Xcode 16 (в т.ч. дефолтный в CI на macos-15) собираем фолбэк.
+            #if compiler(>=6.2)
             if #available(macOS 26.0, *) {
                 if interactive {
                     self.glassEffect((tint.map { Glass.regular.tint($0) } ?? .regular).interactive(), in: shape)
@@ -22,6 +25,12 @@ extension View {
                         .shadow(color: .black.opacity(0.22), radius: 12, y: 8)
                 )
             }
+            #else
+            self.background(
+                shape.fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.22), radius: 12, y: 8)
+            )
+            #endif
         }
         .overlay(
             shape.stroke(
@@ -67,10 +76,14 @@ struct LiquidContainer<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: spacing, content: content)
         } else {
             content()
         }
+        #else
+        content()
+        #endif
     }
 }
