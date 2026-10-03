@@ -28,12 +28,12 @@ final class NowPlayingManager: @unchecked Sendable {
 
         center.playCommand.isEnabled = true
         center.playCommand.addTarget { _ in
-            MainActor.assumeIsolated { NowPlayingManager.shared.playPause() }
+            MainActor.assumeIsolated { NowPlayingManager.shared.play() }
             return .success
         }
         center.pauseCommand.isEnabled = true
         center.pauseCommand.addTarget { _ in
-            MainActor.assumeIsolated { NowPlayingManager.shared.playPause() }
+            MainActor.assumeIsolated { NowPlayingManager.shared.pause() }
             return .success
         }
         center.togglePlayPauseCommand.isEnabled = true
@@ -77,6 +77,16 @@ final class NowPlayingManager: @unchecked Sendable {
     }
 
     private func playPause() { controller?.toggleSession() }
+    /// Явные play/pause (наушники, Control Center): «пауза» на паузе
+    /// не должна включать музыку, а «play» во время игры — ставить паузу.
+    private func play() {
+        guard player?.isPlaying != true else { return }
+        controller?.toggleSession()
+    }
+    private func pause() {
+        guard player?.isPlaying == true else { return }
+        controller?.toggleSession()
+    }
     private func skipNext() { player?.next() }
     private func skipPrevious() { player?.previous() }
     private func seek(to position: Double) { player?.seek(to: position) }

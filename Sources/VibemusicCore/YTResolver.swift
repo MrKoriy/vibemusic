@@ -6,17 +6,20 @@ public enum ResolverError: LocalizedError {
     case failed(String)
     case noStream
     case nothingImported
+    case unsupportedSource
 
     public var errorDescription: String? {
         switch self {
         case .ytDlpMissing:
-            return "yt-dlp не найден. Установите: brew install yt-dlp"
+            return "yt-dlp не найден. Переустановите приложение (make install) или установите: brew install yt-dlp"
         case .failed(let message):
             return "yt-dlp: \(message)"
         case .noStream:
             return "Не удалось получить аудиопоток. Попробуйте другой трек."
         case .nothingImported:
             return "По этой ссылке ничего не найдено."
+        case .unsupportedSource:
+            return "Поддерживаются только ссылки YouTube (youtube.com, youtu.be) или ID видео."
         }
     }
 }
@@ -138,6 +141,9 @@ public enum YTResolver {
     }
 
     public static func streamURL(for videoID: String, proxy: String? = nil) throws -> URL {
+        // Только ID видео или ссылка YouTube: строка вида `--exec=…` не должна
+        // превратиться в опцию yt-dlp (защита от подстановки аргументов).
+        let target = try sanitizedSource(videoID)
         var arguments = [
             "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]/bestaudio[protocol^=m3u8]",
             "-g", "--no-warnings", "--no-playlist",
@@ -145,7 +151,8 @@ public enum YTResolver {
         if let proxy {
             arguments += ["--proxy", proxy, "--socket-timeout", "30", "--retries", "2"]
         }
-        arguments.append(videoID)
+        // `--` — конец опций: дальше yt-dlp трактует аргумент только как URL/ID.
+        arguments += ["--", target]
         let output = try run(arguments, timeout: 50)
         guard let line = output.split(separator: "\n").first(where: { !$0.isEmpty }),
               let url = URL(string: String(line)) else {
@@ -250,7 +257,7 @@ public enum YTResolver {
     }
 
     public static func importTracks(from raw: String, proxy: String? = nil, playlist: Bool? = nil) throws -> [Track] {
-        let argument = normalize(raw)
+        let argument = try sanitizedSource(raw)
         let isPlaylist = playlist ?? raw.contains("list=")
         var arguments: [String]
         if isPlaylist {
@@ -261,7 +268,7 @@ public enum YTResolver {
         if let proxy {
             arguments += ["--proxy", proxy, "--socket-timeout", "30", "--retries", "2"]
         }
-        arguments.append(argument)
+        arguments += ["--", argument]
         let output = try run(arguments, timeout: 120)
         guard let data = output.data(using: .utf8),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -288,10 +295,31 @@ public enum YTResolver {
         return [Track(id: id, title: title, channel: channel, duration: duration)]
     }
 
-    private static func normalize(_ raw: String) -> String {
+    /// Хосты, ссылки с которых разрешено передавать в yt-dlp.
+    static let allowedHosts: Set<String> = [
+        "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+        "youtu.be", "www.youtube-nocookie.com", "youtube-nocookie.com",
+    ]
+
+    static func isVideoID(_ value: String) -> Bool {
+        value.count == 11 && value.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
+    }
+
+    /// Приводит пользовательский ввод к безопасному аргументу yt-dlp:
+    /// ID видео → полная ссылка; https-ссылка YouTube → как есть; иначе — ошибка.
+    /// Ничто, начинающееся с «-», сюда не проходит.
+    static func sanitizedSource(_ raw: String) throws -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.count == 11, trimmed.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil {
+        if isVideoID(trimmed) {
             return "https://www.youtube.com/watch?v=" + trimmed
+        }
+        guard !trimmed.hasPrefix("-"),
+              let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host?.lowercased(),
+              allowedHosts.contains(host) else {
+            throw ResolverError.unsupportedSource
         }
         return trimmed
     }

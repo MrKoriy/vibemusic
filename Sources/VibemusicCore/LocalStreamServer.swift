@@ -97,6 +97,9 @@ enum CurlFetcher {
 
         var arguments = [
             "-sS", "-L",
+            // Только http(s), в том числе для редиректов.
+            "--proto", "=http,https",
+            "--proto-redir", "=http,https",
             "-m", String(Int(timeout)),
             "-A", LocalStream.userAgent,
             "-D", headerPath,
@@ -568,6 +571,39 @@ public final class LocalStream: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Начало диапазона из Content-Range: «bytes 100-199/1000» → 100.
+    static func parseRangeStart(_ header: String) -> Int64? {
+        let trimmed = header.trimmingCharacters(in: .whitespaces)
+        guard trimmed.lowercased().hasPrefix("bytes ") else { return nil }
+        let spec = trimmed.dropFirst(6)
+        guard let dash = spec.firstIndex(of: "-") else { return nil }
+        return Int64(spec[..<dash].trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Байты чанка с началом `lower` из ответа upstream.
+    /// 206 — принимается, только если Content-Range начинается с `lower`.
+    /// 200 — upstream проигнорировал Range и прислал файл целиком:
+    /// нужный кусок вырезается по смещению (раньше в чанк попадали байты
+    /// с начала файла — звук ломался). Иначе — nil.
+    static func chunkPayload(status: Int, contentRange: String?, body: Data, lower: Int64) -> Data? {
+        guard !body.isEmpty, lower >= 0 else { return nil }
+        let size = Int(chunkSize)
+        switch status {
+        case 206:
+            if let contentRange, let start = parseRangeStart(contentRange), start != lower {
+                return nil
+            }
+            return Data(body.prefix(size))
+        case 200:
+            guard lower < Int64(body.count) else { return nil }
+            let from = body.startIndex + Int(lower)
+            let to = min(body.endIndex, from + size)
+            return body.subdata(in: from..<to)
+        default:
+            return nil
+        }
+    }
+
     static func parseTotal(_ header: String) -> Int64? {
         guard let slash = header.lastIndex(of: "/") else { return nil }
         return Int64(header[header.index(after: slash)...].trimmingCharacters(in: .whitespaces))
@@ -744,38 +780,49 @@ public final class LocalStream: @unchecked Sendable {
                 proxy: proxyURL,
                 timeout: 45
             )
-            guard (200...299).contains(response.status), !response.body.isEmpty else {
+            let contentRange = response.headers["content-range"]
+            guard let payload = Self.chunkPayload(
+                status: response.status,
+                contentRange: contentRange,
+                body: response.body,
+                lower: lower
+            ) else {
                 throw URLError(.badServerResponse)
             }
             recordContentType(response.headers["content-type"])
-            if let rangeHeader = response.headers["content-range"],
-               let parsed = Self.parseTotal(rangeHeader), total() == nil {
+            if let contentRange, let parsed = Self.parseTotal(contentRange), total() == nil {
                 setTotal(parsed)
             }
-            let capped = response.body.prefix(Int(Self.chunkSize))
-            storeCache(chunkLower: lower, data: Data(capped))
-            StreamHub.log("chunk \(lower)-\(lower + Int64(capped.count) - 1) via curl (\(capped.count) bytes)")
-            networkLogger.debug("chunk fetched offset=\(lower, privacy: .public) bytes=\(capped.count, privacy: .public) via curl")
-            return Data(capped)
+            storeCache(chunkLower: lower, data: payload)
+            StreamHub.log("chunk \(lower)-\(lower + Int64(payload.count) - 1) via curl (\(payload.count) bytes)")
+            networkLogger.debug("chunk fetched offset=\(lower, privacy: .public) bytes=\(payload.count, privacy: .public) via curl")
+            return payload
         }
         var request = URLRequest(url: upstream)
         request.setValue("bytes=\(lower)-\(upper)", forHTTPHeaderField: "Range")
         request.timeoutInterval = 20
 
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), !data.isEmpty else {
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        let contentRange = http.value(forHTTPHeaderField: "Content-Range")
+        guard let payload = Self.chunkPayload(
+            status: http.statusCode,
+            contentRange: contentRange,
+            body: data,
+            lower: lower
+        ) else {
             throw URLError(.badServerResponse)
         }
         recordContentType(http.value(forHTTPHeaderField: "Content-Type"))
-        if let rangeHeader = http.value(forHTTPHeaderField: "Content-Range"),
-           let parsed = Self.parseTotal(rangeHeader), total() == nil {
+        if let contentRange, let parsed = Self.parseTotal(contentRange), total() == nil {
             setTotal(parsed)
         }
-        let capped = data.prefix(Int(Self.chunkSize))
-        storeCache(chunkLower: lower, data: Data(capped))
-        StreamHub.log("chunk \(lower)-\(lower + Int64(capped.count) - 1) fetched (\(capped.count) bytes)")
-        networkLogger.debug("chunk fetched offset=\(lower, privacy: .public) bytes=\(capped.count, privacy: .public)")
-        return Data(capped)
+        storeCache(chunkLower: lower, data: payload)
+        StreamHub.log("chunk \(lower)-\(lower + Int64(payload.count) - 1) fetched (\(payload.count) bytes)")
+        networkLogger.debug("chunk fetched offset=\(lower, privacy: .public) bytes=\(payload.count, privacy: .public)")
+        return payload
     }
 }
 

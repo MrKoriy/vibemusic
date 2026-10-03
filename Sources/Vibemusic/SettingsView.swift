@@ -169,7 +169,7 @@ struct SessionSettingsTab: View {
         Form {
             Picker("Режим по умолчанию", selection: $controller.timerModeRaw) {
                 Text("Обратный отсчёт").tag(TimerEngine.Mode.countdown.rawValue)
-                Text("Помодори").tag(TimerEngine.Mode.pomodoro.rawValue)
+                Text("Помодоро").tag(TimerEngine.Mode.pomodoro.rawValue)
             }
             Picker("Длительность по умолчанию", selection: $controller.sessionMinutes) {
                 ForEach(AppDefaults.allDurations, id: \.self) { minutes in
