@@ -72,8 +72,54 @@ public enum YTResolver {
         return nil
     }
 
-    private static func run(_ arguments: [String], timeout: TimeInterval) throws -> String {
+    /// Содержимое конфига yt-dlp с прокси. Логин/пароль прокси не должны
+    /// попадать в argv: его видит любой локальный пользователь через `ps`.
+    /// yt-dlp разбирает конфиг через shlex — значение в одинарных кавычках.
+    /// nil — если в URL есть перевод строки или NUL (такой URL не пропускаем).
+    static func proxyConfigContents(proxy: String) -> String? {
+        guard !proxy.isEmpty,
+              proxy.rangeOfCharacter(from: CharacterSet(charactersIn: "\n\r\u{0}")) == nil else { return nil }
+        let quoted = "'" + proxy.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        return "--proxy \(quoted)\n"
+    }
+
+    /// Пишет конфиг с прокси в приватную временную папку (0700/0600).
+    private static func writeProxyConfig(_ proxy: String) throws -> URL {
+        guard let contents = proxyConfigContents(proxy: proxy) else {
+            throw ResolverError.failed("Некорректный адрес прокси")
+        }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vibemusic-ytdlp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let file = dir.appendingPathComponent("proxy.conf")
+        guard FileManager.default.createFile(
+            atPath: file.path,
+            contents: Data(contents.utf8),
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            try? FileManager.default.removeItem(at: dir)
+            throw ResolverError.failed("Не удалось подготовить конфиг прокси")
+        }
+        return dir
+    }
+
+    private static func run(_ arguments: [String], timeout: TimeInterval, proxy: String? = nil) throws -> String {
         guard let path = ytDlpPath() else { throw ResolverError.ytDlpMissing }
+        var arguments = arguments
+        var proxyDir: URL?
+        if let proxy {
+            let dir = try writeProxyConfig(proxy)
+            proxyDir = dir
+            // Опции должны идти до `--`, поэтому вставляем конфиг в начало.
+            arguments.insert(contentsOf: ["--config-locations", dir.appendingPathComponent("proxy.conf").path], at: 0)
+        }
+        defer {
+            if let proxyDir { try? FileManager.default.removeItem(at: proxyDir) }
+        }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: path)
         task.arguments = arguments
@@ -148,12 +194,13 @@ public enum YTResolver {
             "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]/bestaudio[protocol^=m3u8]",
             "-g", "--no-warnings", "--no-playlist",
         ]
-        if let proxy {
-            arguments += ["--proxy", proxy, "--socket-timeout", "30", "--retries", "2"]
+        if proxy != nil {
+            // Сам прокси передаётся через --config-locations (см. run), не в argv.
+            arguments += ["--socket-timeout", "30", "--retries", "2"]
         }
         // `--` — конец опций: дальше yt-dlp трактует аргумент только как URL/ID.
         arguments += ["--", target]
-        let output = try run(arguments, timeout: 50)
+        let output = try run(arguments, timeout: 50, proxy: proxy)
         guard let line = output.split(separator: "\n").first(where: { !$0.isEmpty }),
               let url = URL(string: String(line)) else {
             throw ResolverError.noStream
@@ -265,11 +312,12 @@ public enum YTResolver {
         } else {
             arguments = ["-J", "--skip-download", "--no-playlist"]
         }
-        if let proxy {
-            arguments += ["--proxy", proxy, "--socket-timeout", "30", "--retries", "2"]
+        if proxy != nil {
+            // Сам прокси передаётся через --config-locations (см. run), не в argv.
+            arguments += ["--socket-timeout", "30", "--retries", "2"]
         }
         arguments += ["--", argument]
-        let output = try run(arguments, timeout: 120)
+        let output = try run(arguments, timeout: 120, proxy: proxy)
         guard let data = output.data(using: .utf8),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw ResolverError.nothingImported

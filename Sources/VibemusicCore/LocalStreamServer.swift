@@ -105,8 +105,13 @@ enum CurlFetcher {
             "-D", headerPath,
             "-o", bodyPath,
         ]
+        // Прокси (с логином/паролем) — через конфиг на stdin, а не в argv:
+        // argv любого процесса виден всем локальным пользователям через `ps`.
+        var stdinConfig: Data?
         if let proxy {
-            arguments += ["-x", proxy]
+            guard let line = configLine(proxy: proxy) else { throw URLError(.badURL) }
+            stdinConfig = Data(line.utf8)
+            arguments += ["-K", "-"]
         }
         if let range {
             arguments += ["-r", "\(range.start)-\(range.end)"]
@@ -118,6 +123,12 @@ enum CurlFetcher {
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = Pipe()
+        let stdinPipe: Pipe? = stdinConfig == nil ? nil : Pipe()
+        if let stdinPipe {
+            process.standardInput = stdinPipe
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
 
         let watchdog = DispatchWorkItem {
             if process.isRunning { process.terminate() }
@@ -134,6 +145,11 @@ enum CurlFetcher {
                 }
                 do {
                     try process.run()
+                    if let stdinPipe, let stdinConfig {
+                        // Конфиг крошечный (меньше буфера пайпа) — запись не блокирует.
+                        stdinPipe.fileHandleForWriting.write(stdinConfig)
+                        try? stdinPipe.fileHandleForWriting.close()
+                    }
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -155,6 +171,17 @@ enum CurlFetcher {
         }
         let parsed = parse(headerDump: headerDump)
         return Response(status: parsed.status, headers: parsed.headers, body: body)
+    }
+
+    /// Строка конфига curl (`-K`) с прокси. Значение в двойных кавычках,
+    /// `\` и `"` экранируются. nil — если в URL есть перевод строки или NUL.
+    static func configLine(proxy: String) -> String? {
+        guard !proxy.isEmpty,
+              proxy.rangeOfCharacter(from: CharacterSet(charactersIn: "\n\r\u{0}")) == nil else { return nil }
+        let escaped = proxy
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "proxy = \"\(escaped)\"\n"
     }
 
     /// Разбирает дамп заголовков curl (-D). При редиректах curl пишет несколько
@@ -419,7 +446,11 @@ public final class StreamHub: @unchecked Sendable {
     }
 
     @discardableResult
-    public func openStream(upstream: URL, proxy: String? = nil) throws -> LocalStream {
+    public func openStream(
+        upstream: URL,
+        proxy: String? = nil,
+        refresher: LocalStream.UpstreamRefresher? = nil
+    ) throws -> LocalStream {
         // If already started, fast path; otherwise block briefly (CLI / legacy).
         if serverPort == 0 {
             let handle = try startAsync()
@@ -444,7 +475,7 @@ public final class StreamHub: @unchecked Sendable {
             }
             finalizeStart(handle: handle, port: port)
         }
-        let stream = LocalStream(upstream: upstream, port: serverPort, proxyURL: proxy)
+        let stream = LocalStream(upstream: upstream, port: serverPort, proxyURL: proxy, refresher: refresher)
         streamsLock.lock()
         streams[stream.token] = stream
         streamsLock.unlock()
@@ -495,9 +526,29 @@ public final class StreamHub: @unchecked Sendable {
 }
 
 public final class LocalStream: @unchecked Sendable {
+    /// Повторный резолв ссылки тем же маршрутом (прокси/напрямую).
+    public typealias UpstreamRefresher = @Sendable () async throws -> URL
+
+    /// Ошибка HTTP от upstream: 403/410 у googlevideo = ссылка протухла.
+    struct UpstreamHTTPError: Error, Equatable {
+        let status: Int
+        var isExpiredLink: Bool { status == 403 || status == 410 }
+    }
+
     public let token = UUID().uuidString
-    public let upstream: URL
     public let localURL: URL
+    /// Текущая ссылка upstream. Меняется, когда googlevideo-ссылка истекает
+    /// (≈6 ч): многочасовые треки для сна раньше обрывались на 403.
+    public var upstream: URL {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentUpstream
+    }
+
+    /// Обновляем ссылку заранее, если до истечения осталось меньше этого.
+    static let refreshLeadTime: TimeInterval = 120
+    /// Не чаще одного резолва в этот интервал — защита от цикла 403 → резолв → 403.
+    static let minRefreshInterval: TimeInterval = 30
 
     static let chunkSize: Int64 = 1_048_576
     static let maxCacheBytes: Int64 = 48 * 1_048_576
@@ -517,6 +568,10 @@ public final class LocalStream: @unchecked Sendable {
     private var contentType: String?
     private var inflight: [Int64: ChunkTask] = [:]
     private var closed = false
+    private var currentUpstream: URL
+    private let refresher: UpstreamRefresher?
+    private var refreshTask: Task<URL, Error>?
+    private var lastRefreshAt: Date?
 
     private final class ChunkTask {
         let id = UUID()
@@ -524,8 +579,15 @@ public final class LocalStream: @unchecked Sendable {
         init(task: Task<Data, Error>) { self.task = task }
     }
 
-    init(upstream: URL, port: UInt16, proxyURL: String? = nil, maxCacheBytes: Int64 = LocalStream.maxCacheBytes) {
-        self.upstream = upstream
+    init(
+        upstream: URL,
+        port: UInt16,
+        proxyURL: String? = nil,
+        maxCacheBytes: Int64 = LocalStream.maxCacheBytes,
+        refresher: UpstreamRefresher? = nil
+    ) {
+        self.currentUpstream = upstream
+        self.refresher = refresher
         self.proxyURL = proxyURL
         self.cacheLimitBytes = maxCacheBytes
         self.localURL = URL(string: "http://127.0.0.1:\(port)/\(token).m4a")!
@@ -543,12 +605,15 @@ public final class LocalStream: @unchecked Sendable {
         lock.lock()
         closed = true
         let tasks = inflight.values.map(\.task)
+        let pendingRefresh = refreshTask
+        refreshTask = nil
         inflight.removeAll()
         cache.removeAll()
         cacheOrder.removeAll()
         cacheBytes = 0
         lock.unlock()
         tasks.forEach { $0.cancel() }
+        pendingRefresh?.cancel()
         session.finishTasksAndInvalidate()
         StreamHub.log("stream \(token.prefix(8)) closed")
     }
@@ -682,7 +747,7 @@ public final class LocalStream: @unchecked Sendable {
     func ensureTotal() async throws -> Int64 {
         if let known = total() { return known }
         if let proxyURL {
-            let response = try await CurlFetcher.fetch(url: upstream, range: (0, 1), proxy: proxyURL, timeout: 20)
+            let response = try await CurlFetcher.fetch(url: try await usableUpstream(), range: (0, 1), proxy: proxyURL, timeout: 20)
             guard (200...299).contains(response.status) else {
                 throw URLError(.badServerResponse)
             }
@@ -700,7 +765,7 @@ public final class LocalStream: @unchecked Sendable {
             }
             throw URLError(.badServerResponse)
         }
-        var request = URLRequest(url: upstream)
+        var request = URLRequest(url: try await usableUpstream())
         request.setValue("bytes=0-1", forHTTPHeaderField: "Range")
         request.timeoutInterval = 10
         let (_, response) = try await session.data(for: request)
@@ -768,7 +833,113 @@ public final class LocalStream: @unchecked Sendable {
         lock.unlock()
     }
 
+    // MARK: - Обновление протухшей ссылки
+
+    /// Ссылка для запроса: если она вот-вот истечёт — сначала обновляем.
+    func usableUpstream(now: Date = Date()) async throws -> URL {
+        let url = upstream
+        guard refresher != nil,
+              let expiry = StreamURLCache.parseExpiry(from: url),
+              expiry - now.timeIntervalSince1970 < Self.refreshLeadTime else {
+            return url
+        }
+        return try await refreshUpstream(replacing: url)
+    }
+
+    /// Резолвит ссылку заново. Параллельные запросы чанков ждут один общий
+    /// резолв; если ссылку уже обновили — сразу возвращается новая.
+    func refreshUpstream(replacing failed: URL) async throws -> URL {
+        switch beginRefresh(replacing: failed) {
+        case .alreadyRefreshed(let url):
+            return url
+        case .unavailable:
+            throw UpstreamHTTPError(status: 403)
+        case .wait(let task):
+            do {
+                let url = try await task.value
+                // Другой формат (itag/размер) = другие байты: склеивать нельзя.
+                guard Self.isSameMedia(failed, url) else {
+                    finishRefresh(task: task, result: nil)
+                    throw UpstreamHTTPError(status: 409)
+                }
+                finishRefresh(task: task, result: url)
+                return url
+            } catch {
+                finishRefresh(task: task, result: nil)
+                throw error
+            }
+        }
+    }
+
+    /// Ссылки на один и тот же поток: совпадают itag и clen, если они есть.
+    static func isSameMedia(_ a: URL, _ b: URL) -> Bool {
+        func params(_ url: URL) -> [String: String] {
+            var result: [String: String] = [:]
+            for item in URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [] {
+                if let value = item.value { result[item.name] = value }
+            }
+            return result
+        }
+        let pa = params(a)
+        let pb = params(b)
+        for key in ["itag", "clen"] {
+            if let va = pa[key], let vb = pb[key], va != vb { return false }
+        }
+        return true
+    }
+
+    private enum RefreshStart {
+        case alreadyRefreshed(URL)
+        case unavailable
+        case wait(Task<URL, Error>)
+    }
+
+    private func beginRefresh(replacing failed: URL) -> RefreshStart {
+        lock.lock()
+        defer { lock.unlock() }
+        if closed { return .unavailable }
+        if currentUpstream != failed { return .alreadyRefreshed(currentUpstream) }
+        if let refreshTask { return .wait(refreshTask) }
+        guard let refresher else { return .unavailable }
+        if let lastRefreshAt, Date().timeIntervalSince(lastRefreshAt) < Self.minRefreshInterval {
+            return .unavailable
+        }
+        let task = Task<URL, Error> { try await refresher() }
+        refreshTask = task
+        lastRefreshAt = Date()
+        return .wait(task)
+    }
+
+    private func finishRefresh(task: Task<URL, Error>, result: URL?) {
+        lock.lock()
+        let isCurrent = refreshTask.map { $0 == task } ?? false
+        if isCurrent {
+            refreshTask = nil
+            if let result, !closed {
+                currentUpstream = result
+            }
+        }
+        lock.unlock()
+        if isCurrent, result != nil {
+            StreamHub.log("stream \(token.prefix(8)) upstream refreshed")
+            networkLogger.info("stream upstream refreshed token=\(String(self.token.prefix(8)), privacy: .public)")
+        }
+    }
+
     private func downloadChunk(lower: Int64) async throws -> Data {
+        let url = try await usableUpstream()
+        do {
+            return try await downloadChunk(lower: lower, from: url)
+        } catch let error as UpstreamHTTPError where error.isExpiredLink && refresher != nil {
+            // Ссылка истекла (долгая пауза, многочасовой трек) — резолвим заново
+            // и продолжаем с того же места, без переключения трека.
+            networkLogger.warning("upstream \(error.status, privacy: .public), обновляю ссылку")
+            let fresh = try await refreshUpstream(replacing: url)
+            return try await downloadChunk(lower: lower, from: fresh)
+        }
+    }
+
+    private func downloadChunk(lower: Int64, from upstream: URL) async throws -> Data {
         var upper = lower + Self.chunkSize - 1
         if let total = total() {
             upper = min(upper, total - 1)
@@ -780,6 +951,9 @@ public final class LocalStream: @unchecked Sendable {
                 proxy: proxyURL,
                 timeout: 45
             )
+            if response.status >= 400 {
+                throw UpstreamHTTPError(status: response.status)
+            }
             let contentRange = response.headers["content-range"]
             guard let payload = Self.chunkPayload(
                 status: response.status,
@@ -805,6 +979,9 @@ public final class LocalStream: @unchecked Sendable {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
+        }
+        if http.statusCode >= 400 {
+            throw UpstreamHTTPError(status: http.statusCode)
         }
         let contentRange = http.value(forHTTPHeaderField: "Content-Range")
         guard let payload = Self.chunkPayload(

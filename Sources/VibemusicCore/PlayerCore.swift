@@ -275,8 +275,15 @@ public final class PlayerCore: ObservableObject {
                     // Качка тем же маршрутом, что и резолв: googlevideo
                     // привязывает ссылку к IP запросившего.
                     let streamProxy = raced.1 ? proxyTool : nil
+                    // Когда ссылка истечёт посреди многочасового трека,
+                    // стрим сам получит новую тем же маршрутом.
+                    let refresher: LocalStream.UpstreamRefresher = {
+                        try await Task.detached(priority: .userInitiated) {
+                            try YTResolver.streamURL(for: expectedID, proxy: streamProxy)
+                        }.value
+                    }
                     let stream = try await Task.detached(priority: .userInitiated) {
-                        try StreamHub.shared.openStream(upstream: raced.0, proxy: streamProxy)
+                        try StreamHub.shared.openStream(upstream: raced.0, proxy: streamProxy, refresher: refresher)
                     }.value
                     guard !Task.isCancelled,
                           generation == self.playbackGeneration,

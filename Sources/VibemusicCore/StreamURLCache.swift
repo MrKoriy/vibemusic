@@ -80,7 +80,7 @@ public final class StreamURLCache: @unchecked Sendable {
         saveAsync()
     }
 
-    private static func parseExpiry(from url: URL) -> TimeInterval? {
+    static func parseExpiry(from url: URL) -> TimeInterval? {
         let str = url.absoluteString
         if let range = str.range(of: "expire/([0-9]{9,12})", options: .regularExpression) {
             let sub = str[range].dropFirst(7)
