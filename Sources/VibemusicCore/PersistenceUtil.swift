@@ -27,6 +27,8 @@ public enum PersistenceUtil {
     @discardableResult
     private static func backupCorrupt(fileURL: URL, reason: String) -> String {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = formatter.string(from: Date())
         let backupURL = fileURL

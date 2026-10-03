@@ -94,8 +94,12 @@ public final class StatsStore: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(records),
-              (try? data.write(to: fileURL, options: .atomic)) != nil else { return }
-        lastLoadError = nil
+        do {
+            let data = try JSONEncoder().encode(records)
+            try data.write(to: fileURL, options: .atomic)
+            lastLoadError = nil
+        } catch {
+            lastLoadError = "Не удалось сохранить статистику: \(error.localizedDescription)"
+        }
     }
 }

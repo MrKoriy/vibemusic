@@ -104,8 +104,10 @@ final class SessionController: ObservableObject {
         fallbackTask?.cancel()
         fallbackTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
-            guard !Task.isCancelled else { return }
-            self?.beginTimerWhenReady()
+            guard !Task.isCancelled, let self else { return }
+            // Don't start timer if stream already failed (needsRetry set by PlayerCore.handleLoadFailure).
+            guard !self.player.needsRetry else { return }
+            self.beginTimerWhenReady()
         }
     }
 

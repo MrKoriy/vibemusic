@@ -48,13 +48,23 @@ public enum YTResolver {
         ])
         return paths
     }()
-    private nonisolated(unsafe) static var cachedPath: String?
+    private static let pathLock = NSLock()
+    nonisolated(unsafe) private static var _cachedPath: String?
 
     public static func ytDlpPath() -> String? {
-        if let path = cachedPath { return path }
+        pathLock.lock()
+        if let path = _cachedPath {
+            pathLock.unlock()
+            return path
+        }
+        pathLock.unlock()
         for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            cachedPath = candidate
-            return candidate
+            pathLock.lock()
+            // Re-check after acquiring lock — another thread may have set it.
+            if _cachedPath == nil { _cachedPath = candidate }
+            let resolved = _cachedPath ?? candidate
+            pathLock.unlock()
+            return resolved
         }
         return nil
     }
@@ -64,7 +74,10 @@ public enum YTResolver {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: path)
         task.arguments = arguments
-        task.environment = ["PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", "HOME": NSHomeDirectory()]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        env["HOME"] = NSHomeDirectory()
+        task.environment = env
 
         let stdout = Pipe()
         let stderr = Pipe()

@@ -124,7 +124,7 @@ final class NowPlayingManager: @unchecked Sendable {
         let bounds = NSRect(x: 0, y: 0, width: side, height: side)
         let image = NSImage(size: bounds.size)
 
-        let base = NSColor(Theme.color(for: categoryID)).usingColorSpace(.sRGB) ?? .systemBlue
+        let base = Theme.nsColor(for: categoryID).usingColorSpace(.sRGB) ?? .systemBlue
         let top = base.blended(withFraction: 0.30, of: .black) ?? base
         let bottom = base.blended(withFraction: 0.70, of: .black) ?? base
         guard let gradient = NSGradient(colors: [top, bottom]) else { return nil }

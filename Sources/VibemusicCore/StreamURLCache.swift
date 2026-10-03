@@ -117,10 +117,12 @@ public final class StreamURLCache: @unchecked Sendable {
         return try? JSONEncoder().encode(valid)
     }
 
+    private let saveQueue = DispatchQueue(label: "vibemusic.cache.save", qos: .utility)
+
     private func saveAsync() {
         guard let data = snapshotData() else { return }
         let target = self.fileURL
-        Task.detached(priority: .utility) {
+        saveQueue.async {
             try? data.write(to: target, options: .atomic)
         }
     }

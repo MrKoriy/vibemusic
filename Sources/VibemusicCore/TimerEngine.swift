@@ -41,7 +41,11 @@ public final class TimerEngine: ObservableObject {
 
     public init() {}
 
-    deinit { ticker?.invalidate() }
+    deinit {
+        if let t = ticker {
+            DispatchQueue.main.async { t.invalidate() }
+        }
+    }
 
     public func start(minutes: Int, mode: Mode, breakMinutes: Int) {
         workSeconds = TimeInterval(max(1, minutes)) * 60

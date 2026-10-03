@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 enum Theme {
     static func color(for id: String) -> Color {
@@ -53,5 +54,27 @@ enum Theme {
     static func shortDuration(_ minutes: Int) -> String {
         if minutes >= 60, minutes % 60 == 0 { return "\(minutes / 60) ч" }
         return "\(minutes) м"
+    }
+
+    // Native NSColor table for deterministic artwork — avoids NSColor(SwiftUI.Color) bridge
+    // which returns nil for semantic colors like .indigo in some contexts.
+    static func nsColor(for id: String) -> NSColor {
+        switch id {
+        case "work": NSColor.systemIndigo
+        case "lofi": NSColor.systemPurple
+        case "classical": NSColor(calibratedRed: 0.88, green: 0.68, blue: 0.36, alpha: 1)
+        case "ambient": NSColor.systemTeal
+        case "alpha": NSColor.systemBlue
+        case "beta": NSColor.systemOrange
+        case "gamma": NSColor(calibratedRed: 0.66, green: 0.32, blue: 0.96, alpha: 1)
+        case "binaural": NSColor.systemTeal
+        case "meditation": NSColor.systemMint
+        case "frequencies": NSColor.systemPink
+        case "schumann": NSColor.systemGreen
+        case "manifest": NSColor.systemYellow
+        case "sleep": NSColor(calibratedRed: 0.38, green: 0.42, blue: 0.92, alpha: 1)
+        case "morning": NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.28, alpha: 1)
+        default: NSColor.systemIndigo
+        }
     }
 }

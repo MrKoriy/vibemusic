@@ -192,6 +192,86 @@ enum CurlFetcher {
     }
 }
 
+/// Handle for NWListener startup — supports both sync (legacy) and async waiting.
+public final class AsyncStartHandle: @unchecked Sendable {
+    var listener: NWListener?
+    private let lock = NSLock()
+    private var port: UInt16?
+    private var error: Error?
+    private var continuations: [CheckedContinuation<UInt16, Error>] = []
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    static var alreadyReady: AsyncStartHandle { AsyncStartHandle() }
+
+    static func ready(port: UInt16) -> AsyncStartHandle {
+        let h = AsyncStartHandle()
+        h.lock.lock()
+        h.port = port
+        h.lock.unlock()
+        h.semaphore.signal()
+        return h
+    }
+
+    func complete(port: UInt16) {
+        lock.lock()
+        self.port = port
+        let conts = continuations
+        continuations.removeAll()
+        lock.unlock()
+        semaphore.signal()
+        for c in conts { c.resume(returning: port) }
+    }
+
+    func fail(error: Error) {
+        lock.lock()
+        self.error = error
+        let conts = continuations
+        continuations.removeAll()
+        lock.unlock()
+        semaphore.signal()
+        for c in conts { c.resume(throwing: error) }
+    }
+
+    func waitForResult(timeout: TimeInterval) throws -> UInt16 {
+        let result = semaphore.wait(timeout: .now() + timeout)
+        lock.lock()
+        defer { lock.unlock() }
+        if let p = port { return p }
+        if let e = error { throw e }
+        if result == .timedOut { throw URLError(.timedOut) }
+        return port ?? 0
+    }
+
+    private func peekResult() -> Result<UInt16, Error>? {
+        lock.lock(); defer { lock.unlock() }
+        if let p = port { return .success(p) }
+        if let e = error { return .failure(e) }
+        return nil
+    }
+
+    private func registerContinuation(_ cont: CheckedContinuation<UInt16, Error>) -> Result<UInt16, Error>? {
+        lock.lock(); defer { lock.unlock() }
+        if let p = port { return .success(p) }
+        if let e = error { return .failure(e) }
+        continuations.append(cont)
+        return nil
+    }
+
+    func waitAsync() async throws -> UInt16 {
+        if let r = peekResult() {
+            switch r { case .success(let p): return p; case .failure(let e): throw e }
+        }
+        return try await withCheckedThrowingContinuation { cont in
+            if let r = self.registerContinuation(cont) {
+                switch r {
+                case .success(let p): cont.resume(returning: p)
+                case .failure(let e): cont.resume(throwing: e)
+                }
+            }
+        }
+    }
+}
+
 /// Локальный HTTP-сервер для AVPlayer.
 /// Проблема: googlevideo троттлит open-ended Range-запросы (~27 КБ/с) и
 /// придирчив к User-Agent, а AVAssetResourceLoaderDelegate заставляет AVPlayer
@@ -206,6 +286,7 @@ public final class StreamHub: @unchecked Sendable {
     private let startLock = NSLock()
     private var listener: NWListener?
     private var serverPort: UInt16 = 0
+    private var pendingHandle: AsyncStartHandle?
 
     private let streamsLock = NSLock()
     private var streams: [String: LocalStream] = [:]
@@ -220,24 +301,55 @@ public final class StreamHub: @unchecked Sendable {
 
     public func start() throws {
         startLock.lock()
-        defer { startLock.unlock() }
-        if serverPort != 0 { return }
+        if serverPort != 0 { startLock.unlock(); return }
+        if let pending = pendingHandle {
+            startLock.unlock()
+            do {
+                let p = try pending.waitForResult(timeout: 5)
+                if p != 0 { claimStart(port: p, handle: pending) }
+                return
+            } catch {
+                clearPendingIfMatch(pending)
+                throw error
+            }
+        }
+        startLock.unlock()
+        let handle = try startAsync()
+        do {
+            let port = try handle.waitForResult(timeout: 5)
+            guard port != 0 else { clearPendingIfMatch(handle); return }
+            claimStart(port: port, handle: handle)
+        } catch {
+            clearPendingIfMatch(handle)
+            throw error
+        }
+    }
+
+    /// Async variant: waits for NWListener without blocking the caller's thread
+    /// via semaphore under the hood only when called from non-async context.
+    /// Prefer `startAsync()` from async call sites to avoid any blocking.
+    public func startAsync() throws -> AsyncStartHandle {
+        startLock.lock()
+        if serverPort != 0 {
+            let p = serverPort
+            startLock.unlock()
+            return AsyncStartHandle.ready(port: p)
+        }
+        if let pending = pendingHandle { startLock.unlock(); return pending }
 
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
         params.allowLocalEndpointReuse = true
 
         let listener = try NWListener(using: params)
-        let semaphore = DispatchSemaphore(value: 0)
-        final class PortBox: @unchecked Sendable { var value: UInt16 = 0 }
-        let portBox = PortBox()
-        listener.stateUpdateHandler = { state in
+        let handle = AsyncStartHandle()
+        listener.stateUpdateHandler = { [weak handle] state in
             switch state {
             case .ready:
-                portBox.value = listener.port?.rawValue ?? 0
-                semaphore.signal()
-            case .failed:
-                semaphore.signal()
+                let port = listener.port?.rawValue ?? 0
+                handle?.complete(port: port)
+            case .failed(let error):
+                handle?.fail(error: error)
             default:
                 break
             }
@@ -246,23 +358,89 @@ public final class StreamHub: @unchecked Sendable {
             self?.accept(connection)
         }
         listener.start(queue: handlerQueue)
-        _ = semaphore.wait(timeout: .now() + 5)
+        handle.listener = listener
+        pendingHandle = handle
+        startLock.unlock()
 
-        guard portBox.value != 0 else {
-            throw NSError(
-                domain: "StreamHub",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Не удалось запустить локальный потоковый сервер"]
-            )
+        // Synchronous wait — only for legacy sync callers. Async callers
+        // should use `await handle.waitAsync()` pattern via `openStreamAsync`.
+        return handle
+    }
+
+    private func checkStarted() -> Bool {
+        startLock.lock(); defer { startLock.unlock() }
+        return serverPort != 0
+    }
+
+    private func claimStart(port: UInt16, handle: AsyncStartHandle) {
+        startLock.lock(); defer { startLock.unlock() }
+        if serverPort == 0 {
+            serverPort = port
+            listener = handle.listener
+            pendingHandle = nil
+            Self.log("server ready on 127.0.0.1:\(port)")
+        } else if pendingHandle === handle {
+            pendingHandle = nil
         }
-        serverPort = portBox.value
-        self.listener = listener
-        Self.log("server ready on 127.0.0.1:\(portBox.value)")
+    }
+
+    private func clearPendingIfMatch(_ handle: AsyncStartHandle) {
+        startLock.lock(); defer { startLock.unlock() }
+        if pendingHandle === handle { pendingHandle = nil }
+    }
+
+    /// Waits for listener readiness asynchronously — does not block a thread.
+    public func ensureStarted() async throws {
+        if checkStarted() { return }
+        let handle = try startAsync()
+        do {
+            let port = try await handle.waitAsync()
+            claimStart(port: port, handle: handle)
+        } catch {
+            clearPendingIfMatch(handle)
+            throw error
+        }
+    }
+
+    private func finalizeStart(handle: AsyncStartHandle, port: UInt16) {
+        startLock.lock()
+        if serverPort == 0 {
+            serverPort = port
+            listener = handle.listener
+            pendingHandle = nil
+            Self.log("server ready on 127.0.0.1:\(port)")
+        } else if pendingHandle === handle {
+            pendingHandle = nil
+        }
+        startLock.unlock()
     }
 
     @discardableResult
     public func openStream(upstream: URL, proxy: String? = nil) throws -> LocalStream {
-        try start()
+        // If already started, fast path; otherwise block briefly (CLI / legacy).
+        if serverPort == 0 {
+            let handle = try startAsync()
+            let port: UInt16
+            do {
+                port = try handle.waitForResult(timeout: 5)
+            } catch {
+                clearPendingIfMatch(handle)
+                throw NSError(
+                    domain: "StreamHub",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Не удалось запустить локальный потоковый сервер: \(error.localizedDescription)"]
+                )
+            }
+            guard port != 0 else {
+                clearPendingIfMatch(handle)
+                throw NSError(
+                    domain: "StreamHub",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Не удалось запустить локальный потоковый сервер"]
+                )
+            }
+            finalizeStart(handle: handle, port: port)
+        }
         let stream = LocalStream(upstream: upstream, port: serverPort, proxyURL: proxy)
         streamsLock.lock()
         streams[stream.token] = stream

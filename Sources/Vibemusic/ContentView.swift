@@ -11,7 +11,7 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var isAdding = false
-    @State private var textFieldFocused = false
+    @State private var spaceMonitor: Any?
     @State private var didShowLoadDiagnostics = false
 
     private var selectedCategory: MusicCategory? { controller.selectedCategory }
@@ -51,36 +51,37 @@ struct ContentView: View {
         ZStack {
             AmbientBackground(tint: tint)
             ScrollView(showsIndicators: false) {
-                LiquidContainer(spacing: 14) {
-                    VStack(spacing: 26) {
-                        header
-                        ZStack {
-                            Circle()
-                                .fill(RadialGradient(colors: [tint.opacity(0.38), .clear], center: .center, startRadius: 0, endRadius: 270))
-                                .frame(width: 540, height: 540)
-                                .blur(radius: 30)
-                                .drawingGroup()
-                                .allowsHitTesting(false)
-                            TimerRing(
-                                remaining: displayRemaining,
-                                progress: displayProgress,
-                                tint: tint,
-                                phaseLabel: phaseLabel,
-                                subLabel: subLabel,
-                                cyclesLabel: (controller.timerMode == .pomodoro && timer.completedCycles > 0)
-                                    ? "циклов завершено: \(timer.completedCycles)" : nil
-                            )
-                        }
-                        sessionControls
-                        durationRow
-                        categoriesGrid
-                        todayFooter
-                        PlayerBar(player: player, controller: controller, volume: volumeBinding)
+                // GlassEffectContainer НЕ оборачивает весь скролл: контейнер
+                // рассчитан на соседние мелкие формы, а весь контент с LazyVGrid
+                // внутри него уходит в бесконечный цикл пересчёта раскладки (98% CPU).
+                VStack(spacing: 26) {
+                    header
+                    ZStack {
+                        Circle()
+                            .fill(RadialGradient(colors: [tint.opacity(0.38), .clear], center: .center, startRadius: 0, endRadius: 270))
+                            .frame(width: 540, height: 540)
+                            .blur(radius: 30)
+                            .drawingGroup()
+                            .allowsHitTesting(false)
+                        TimerRing(
+                            remaining: displayRemaining,
+                            progress: displayProgress,
+                            tint: tint,
+                            phaseLabel: phaseLabel,
+                            subLabel: subLabel,
+                            cyclesLabel: (controller.timerMode == .pomodoro && timer.completedCycles > 0)
+                                ? "циклов завершено: \(timer.completedCycles)" : nil
+                        )
                     }
-                    .padding(.horizontal, 30)
-                    .padding(.top, 16)
-                    .padding(.bottom, 28)
+                    sessionControls
+                    durationRow
+                    categoriesGrid
+                    todayFooter
+                    PlayerBar(player: player, controller: controller, volume: volumeBinding)
                 }
+                .padding(.horizontal, 30)
+                .padding(.top, 16)
+                .padding(.bottom, 28)
                 .frame(maxWidth: 940)
                 .frame(maxWidth: .infinity)
             }
@@ -101,24 +102,43 @@ struct ContentView: View {
                 delegate.openMain = { openWindow(id: "main") }
             }
             NowPlayingManager.shared.activate(player: player, controller: controller)
+            MenuBarController.shared.install(controller: controller, player: player)
             reportBrokenDataIfNeeded()
+            installSpaceMonitor()
         }
-        .onReceive(
-            NotificationCenter.default
-                .publisher(for: NSApplication.didUpdateNotification)
-                .receive(on: RunLoop.main)
-        ) { _ in
-            MainActor.assumeIsolated {
-                let responder = NSApp.keyWindow?.firstResponder
-                textFieldFocused = responder is NSTextView || responder is NSTextField
+        .onDisappear {
+            if let monitor = spaceMonitor {
+                NSEvent.removeMonitor(monitor)
+                spaceMonitor = nil
             }
+        }
+    }
+
+    /// Space = старт/пауза сессии. Локальный монитор keyDown срабатывает
+    /// только на нажатие клавиши (не крутит runloop, в отличие от
+    /// didUpdateNotification). Пробел перехватывается лишь когда ничего
+    /// не в фокусе: текстовые поля и контролы получают его первыми.
+    private func installSpaceMonitor() {
+        guard spaceMonitor == nil else { return }
+        spaceMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 49,
+               event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+               let keyWindow = NSApp.keyWindow,
+               !keyWindow.isSheet,
+               keyWindow.firstResponder === keyWindow {
+                MainActor.assumeIsolated {
+                    controller.toggleSession()
+                }
+                return nil
+            }
+            return event
         }
     }
 
     private func reportBrokenDataIfNeeded() {
         guard !didShowLoadDiagnostics else { return }
         didShowLoadDiagnostics = true
-        if let message = store.lastLoadError ?? stats.lastLoadError {
+        if let message = store.lastLoadError ?? store.curatedLoadError ?? stats.lastLoadError {
             player.statusText = message
         }
     }
@@ -377,9 +397,8 @@ struct ContentView: View {
 
     private var hiddenShortcuts: some View {
         Group {
-            Button("") { controller.toggleSession() }
-                .keyboardShortcut(.space, modifiers: [])
-                .disabled(textFieldFocused || isAdding)
+            // Space обрабатывает локальный keyDown-монитор (installSpaceMonitor):
+            // keyboardShortcut-кнопка перехватывала бы пробел у текстовых полей.
             Button("") { player.next() }
                 .keyboardShortcut(.rightArrow, modifiers: .command)
             Button("") { player.previous() }

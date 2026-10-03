@@ -115,6 +115,24 @@ public struct ProxyConfig: Equatable, Sendable {
         guard let components = URLComponents(string: trimmed) else { return false }
         guard let scheme = components.scheme?.lowercased() else { return false }
         guard ["socks5", "socks5h", "http", "https"].contains(scheme) else { return false }
-        return components.host != nil && components.port != nil
+        guard components.host != nil else { return false }
+        // http/https may omit port (defaults to 8080/443) — valid without.
+        // socks5/socks5h require explicit port.
+        if ["socks5", "socks5h"].contains(scheme) {
+            return components.port != nil
+        }
+        return true
+    }
+
+    /// Human-readable validation error for UI, nil if valid.
+    public var validationError: String? {
+        let trimmed = url.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return "Адрес прокси не указан" }
+        guard let components = URLComponents(string: trimmed) else { return "Некорректный URL прокси" }
+        guard let scheme = components.scheme?.lowercased() else { return "Укажите схему (socks5:// или http://)" }
+        if !["socks5", "socks5h", "http", "https"].contains(scheme) { return "Поддерживаются только socks5 и http(s)" }
+        if components.host == nil { return "Укажите хост прокси" }
+        if ["socks5", "socks5h"].contains(scheme), components.port == nil { return "Для SOCKS укажите порт (например :1080)" }
+        return nil
     }
 }

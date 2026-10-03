@@ -29,7 +29,12 @@ public struct Track: Codable, Identifiable, Hashable, Sendable {
         self.source = source
     }
 
-    public var url: URL { URL(string: "https://www.youtube.com/watch?v=" + id) ?? URL(fileURLWithPath: "/") }
+    public var url: URL? {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? id
+        return URL(string: "https://www.youtube.com/watch?v=" + encoded)
+    }
+    /// Legacy non-optional accessor — falls back to file root only if encoding fails (should never happen).
+    public var urlValue: URL { url ?? URL(fileURLWithPath: "/") }
 
     public var status: TrackStatus {
         if liveFlag == true { return .live }
@@ -59,7 +64,10 @@ public struct Track: Codable, Identifiable, Hashable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        guard let decodedID = try? c.decode(String.self, forKey: .id), !decodedID.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .id, in: c, debugDescription: "Track.id is required and must be non-empty")
+        }
+        id = decodedID
         title = (try? c.decode(String.self, forKey: .title)) ?? "Без названия"
         channel = (try? c.decodeIfPresent(String.self, forKey: .channel))
             ?? (try? c.decodeIfPresent(String.self, forKey: .uploader))
@@ -113,7 +121,10 @@ public struct MusicCategory: Codable, Identifiable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        guard let decodedCatID = try? c.decode(String.self, forKey: .id), !decodedCatID.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .id, in: c, debugDescription: "MusicCategory.id is required and must be non-empty")
+        }
+        id = decodedCatID
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         mode = (try? c.decode(SessionMode.self, forKey: .mode)) ?? .focus
         defaultMinutes = (try? c.decode(Int.self, forKey: .defaultMinutes)) ?? 25

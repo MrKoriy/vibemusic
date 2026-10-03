@@ -87,10 +87,19 @@ public final class PlayerCore: ObservableObject {
     }
 
     deinit {
-        if let observer = timeObserver {
-            player.removeTimeObserver(observer)
+        // Cleanup is best-effort here; authoritative cleanup is in cancelPlayback()/reset()
+        // which run on MainActor. Direct player access from deinit may race — capture locally.
+        let observer = timeObserver
+        let timer = fadeTimer
+        let avPlayer = player
+        if let observer {
+            // removeTimeObserver is thread-safe on AVPlayer per docs, but we dispatch
+            // fadeTimer invalidation to main to avoid Timer threading issues.
+            avPlayer.removeTimeObserver(observer)
         }
-        fadeTimer?.invalidate()
+        if let timer {
+            DispatchQueue.main.async { timer.invalidate() }
+        }
     }
 
     // MARK: - Публичное управление
@@ -364,7 +373,8 @@ public final class PlayerCore: ObservableObject {
     }
 
     public func prefetch(track: Track) {
-        if StreamURLCache.shared.get(videoID: track.id) != nil { return }
+        let fingerprint = ProxyConfig.load().fingerprint
+        if StreamURLCache.shared.get(videoID: track.id, route: fingerprint) != nil { return }
         Task.detached(priority: .utility) {
             let proxyTool = ProxyConfig.load().toolURL
             _ = try? await YTResolver.firstSuccess(videoID: track.id, proxy: proxyTool)

@@ -23,9 +23,11 @@ public final class LibraryStore: ObservableObject {
         try? FileManager.default.createDirectory(at: resolved, withIntermediateDirectories: true)
         let userFile = resolved.appendingPathComponent("user_tracks.json")
 
-        curated = Self.loadCurated()
+        let curatedResult = Self.loadCurated()
+        curated = curatedResult.categories
+        curatedLoadError = curatedResult.error
         userTracks = []
-        lastLoadError = nil
+        lastLoadError = curatedResult.error
         self.directory = resolved
 
         switch PersistenceUtil.load([Track].self, from: userFile) {
@@ -38,11 +40,22 @@ public final class LibraryStore: ObservableObject {
         }
     }
 
-    private static func loadCurated() -> [MusicCategory] {
-        guard let url = Bundle.module.url(forResource: "library", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let doc = try? JSONDecoder().decode(LibraryDoc.self, from: data) else { return [] }
-        return doc.categories
+    /// Error from loading bundled library.json, surfaced to UI if non-nil.
+    public private(set) var curatedLoadError: String?
+
+    private static func loadCurated() -> (categories: [MusicCategory], error: String?) {
+        guard let url = Bundle.module.url(forResource: "library", withExtension: "json") else {
+            return ([], "Библиотека не найдена в bundle")
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            return ([], "Не удалось прочитать библиотеку")
+        }
+        do {
+            let doc = try JSONDecoder().decode(LibraryDoc.self, from: data)
+            return (doc.categories, nil)
+        } catch {
+            return ([], "Библиотека повреждена: \(error.localizedDescription)")
+        }
     }
 
     private var userFileURL: URL {
@@ -50,9 +63,13 @@ public final class LibraryStore: ObservableObject {
     }
 
     private func persistUserTracks() {
-        guard let data = try? JSONEncoder().encode(userTracks),
-              (try? data.write(to: userFileURL, options: .atomic)) != nil else { return }
-        lastLoadError = nil
+        do {
+            let data = try JSONEncoder().encode(userTracks)
+            try data.write(to: userFileURL, options: .atomic)
+            lastLoadError = nil
+        } catch {
+            lastLoadError = "Не удалось сохранить: \(error.localizedDescription)"
+        }
     }
 
     public var userCategory: MusicCategory {

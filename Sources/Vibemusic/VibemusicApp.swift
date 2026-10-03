@@ -18,7 +18,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct VibemusicApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @AppStorage(AppDefaults.Keys.menuBarEnabled) private var menuBarEnabled = AppDefaults.menuBarEnabled
 
     @StateObject private var store: LibraryStore
     @StateObject private var stats: StatsStore
@@ -55,6 +54,11 @@ struct VibemusicApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowBackgroundDragBehavior(.enabled)
         .defaultSize(width: 1040, height: 780)
+        .environmentObject(store)
+        .environmentObject(stats)
+        .environmentObject(player)
+        .environmentObject(timer)
+        .environmentObject(controller)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Открыть главное окно") {
@@ -64,20 +68,9 @@ struct VibemusicApp: App {
                 .keyboardShortcut("n", modifiers: .command)
             }
         }
-        .environmentObject(store)
-        .environmentObject(stats)
-        .environmentObject(player)
-        .environmentObject(timer)
-        .environmentObject(controller)
 
         Settings {
             SettingsView(controller: controller, stats: stats)
-        }
-
-        MenuBarExtra(isInserted: $menuBarEnabled) {
-            MenuBarView(controller: controller, player: player, timer: timer, stats: stats)
-        } label: {
-            MenuBarLabel(timer: timer)
         }
     }
 }

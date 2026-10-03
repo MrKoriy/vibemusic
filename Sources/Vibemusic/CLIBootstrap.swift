@@ -300,8 +300,7 @@ enum CLIBootstrap {
             do {
                 let stream = try StreamHub.shared.openStream(upstream: upstream)
                 state.stream = stream
-                print("LOCAL_URL: \(stream.localURL.absoluteString)", terminator: "")
-                _ = stream.localURL
+                print("LOCAL_URL: \(stream.localURL.absoluteString)")
                 fflush(stdout)
                 DispatchQueue.main.async {
                     let item = AVPlayerItem(url: stream.localURL)
