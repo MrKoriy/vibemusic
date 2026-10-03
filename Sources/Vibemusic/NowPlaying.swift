@@ -77,16 +77,11 @@ final class NowPlayingManager: @unchecked Sendable {
     }
 
     private func playPause() { controller?.toggleSession() }
-    /// Явные play/pause (наушники, Control Center): «пауза» на паузе
-    /// не должна включать музыку, а «play» во время игры — ставить паузу.
-    private func play() {
-        guard player?.isPlaying != true else { return }
-        controller?.toggleSession()
-    }
-    private func pause() {
-        guard player?.isPlaying == true else { return }
-        controller?.toggleSession()
-    }
+    /// Явные play/pause (наушники, Control Center) идут через намерения
+    /// контроллера: пауза глушит и таймер, и плеер вместе, независимо от
+    /// состояния буферизации AVPlayer (isPlaying во время загрузки врёт).
+    private func play() { controller?.remotePlay() }
+    private func pause() { controller?.remotePause() }
     private func skipNext() { player?.next() }
     private func skipPrevious() { player?.previous() }
     private func seek(to position: Double) { player?.seek(to: position) }

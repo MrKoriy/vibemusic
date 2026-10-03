@@ -16,6 +16,13 @@ public final class TimerEngine: ObservableObject {
     @Published public private(set) var total: TimeInterval = 0
     @Published public private(set) var completedCycles = 0
     @Published public private(set) var isPaused = false
+    /// Авто-заморозка при буферизации потока: таймер не тикает, пока
+    /// не играет музыка, но это НЕ пауза пользователя — сессия продолжает
+    /// считаться активной, воспроизведение возобновится само.
+    @Published public private(set) var isSuspended = false
+
+    /// Заморожен ли отсчёт вообще: паузой пользователя или буферизацией.
+    public var isFrozen: Bool { isPaused || isSuspended }
 
     /// Injectable clock; tests substitute a deterministic fake.
     /// Deadline math always goes through this closure, never through Date() directly.
@@ -71,17 +78,40 @@ public final class TimerEngine: ObservableObject {
     }
 
     public func resume() {
-        guard phase == .work || phase == .breakPhase, isPaused else { return }
+        guard phase == .work || phase == .breakPhase, isPaused || isSuspended else { return }
         isPaused = false
+        isSuspended = false
         phaseDeadline = clock().addingTimeInterval(remaining)
         startTicker()
         logger.info("resumed with remaining=\(self.remaining, format: .fixed(precision: 1))s")
+    }
+
+    /// Заморозка при буферизации: отсчёт стоит, пока не играет музыка.
+    /// Не конфликтует с паузой пользователя: suspend игнорируется, если
+    /// пользователь уже поставил паузу, а resume снимает обе.
+    public func suspend() {
+        guard phase == .work || phase == .breakPhase, !isPaused, !isSuspended else { return }
+        isSuspended = true
+        remaining = remainingFromDeadline()
+        stopTicker()
+        logger.info("suspended (buffering) with remaining=\(self.remaining, format: .fixed(precision: 1))s")
+    }
+
+    /// Снятие авто-заморозки (поток снова играет). Пауза пользователя
+    /// остаётся в силе.
+    public func unsuspend() {
+        guard phase == .work || phase == .breakPhase, isSuspended else { return }
+        isSuspended = false
+        phaseDeadline = clock().addingTimeInterval(remaining)
+        startTicker()
+        logger.info("unsuspended with remaining=\(self.remaining, format: .fixed(precision: 1))s")
     }
 
     public func reset() {
         stopTicker()
         phase = .idle
         isPaused = false
+        isSuspended = false
         completedCycles = 0
         total = hasStarted ? workSeconds : 0
         remaining = total
@@ -111,7 +141,7 @@ public final class TimerEngine: ObservableObject {
         total = (p == .breakPhase) ? breakSeconds : workSeconds
         remaining = total
         phaseDeadline = clock().addingTimeInterval(total)
-        if isPaused { stopTicker() } else { startTicker() }
+        if isPaused || isSuspended { stopTicker() } else { startTicker() }
         logger.info("phase \(String(describing: p)) started: duration=\(self.total, format: .fixed(precision: 0))s")
     }
 
@@ -156,7 +186,7 @@ public final class TimerEngine: ObservableObject {
     }
 
     private func tick() {
-        guard phase == .work || phase == .breakPhase, !isPaused else { return }
+        guard phase == .work || phase == .breakPhase, !isPaused, !isSuspended else { return }
         let left = phaseDeadline.timeIntervalSince(clock())
         if left > 0 {
             remaining = left
@@ -175,8 +205,8 @@ public final class TimerEngine: ObservableObject {
     }
 
     /// Accurate remaining: while running it is derived from the deadline,
-    /// while paused it is the value frozen at pause time.
+    /// while frozen (user pause or buffering) it is the frozen value.
     private func currentRemaining() -> TimeInterval {
-        isPaused ? remaining : remainingFromDeadline()
+        isFrozen ? remaining : remainingFromDeadline()
     }
 }

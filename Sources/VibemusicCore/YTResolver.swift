@@ -190,10 +190,22 @@ public enum YTResolver {
         // Только ID видео или ссылка YouTube: строка вида `--exec=…` не должна
         // превратиться в опцию yt-dlp (защита от подстановки аргументов).
         let target = try sanitizedSource(videoID)
-        var arguments = [
-            "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]/bestaudio[protocol^=m3u8]",
-            "-g", "--no-warnings", "--no-playlist",
-        ]
+        // Прямой маршрут: сначала HLS-манифест — AVPlayer играет его нативно,
+        // а прогрессивные itag-URL YouTube сейчас часто отдаёт как fMP4-сегменты
+        // (ftyp+moov+sidx+moof), которые прогрессивный плеер не разбирает.
+        // Через прокси AVPlayer ходить не умеет — там остаёмся на прогрессивных.
+        var arguments: [String]
+        if proxy == nil {
+            arguments = [
+                "-f", "bestaudio[protocol^=m3u8]/bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]",
+                "-g", "--no-warnings", "--no-playlist",
+            ]
+        } else {
+            arguments = [
+                "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=mp3]/bestaudio[protocol^=m3u8]",
+                "-g", "--no-warnings", "--no-playlist",
+            ]
+        }
         if proxy != nil {
             // Сам прокси передаётся через --config-locations (см. run), не в argv.
             arguments += ["--socket-timeout", "30", "--retries", "2"]
@@ -206,6 +218,22 @@ public enum YTResolver {
             throw ResolverError.noStream
         }
         return url
+    }
+
+    /// Резолв одного маршрута: сначала InnerTube (1–2 запроса, ~1 с),
+    /// при неудаче — yt-dlp (веб-страница + player API, ~15–25 с).
+    /// Отмена задачи (гонка маршрутов, смена трека) пробрасывается наверх,
+    /// чтобы проигравший не тащил за собой медленный резервный путь.
+    private static func resolveRoute(videoID: String, proxy: String?) async throws -> URL {
+        do {
+            return try await InnertubeClient.audioStream(for: videoID, proxy: proxy)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let fastError {
+            if Task.isCancelled { throw CancellationError() }
+            logger.log("fast path failed, fallback to yt-dlp: \(String(describing: fastError), privacy: .public)")
+            return try streamURL(for: videoID, proxy: proxy)
+        }
     }
 
     /// Резолв ссылки с учётом режима прокси из ProxyConfig:
@@ -256,7 +284,7 @@ public enum YTResolver {
                 if raceDirect {
                     group.addTask {
                         do {
-                            return .success((try streamURL(for: videoID, proxy: nil), false))
+                            return .success((try await resolveRoute(videoID: videoID, proxy: nil), false))
                         } catch {
                             return .failure(error)
                         }
@@ -265,7 +293,7 @@ public enum YTResolver {
                 if raceProxy, let proxy {
                     group.addTask {
                         do {
-                            return .success((try streamURL(for: videoID, proxy: proxy), true))
+                            return .success((try await resolveRoute(videoID: videoID, proxy: proxy), true))
                         } catch {
                             return .failure(error)
                         }
@@ -306,6 +334,16 @@ public enum YTResolver {
     public static func importTracks(from raw: String, proxy: String? = nil, playlist: Bool? = nil) throws -> [Track] {
         let argument = try sanitizedSource(raw)
         let isPlaylist = playlist ?? raw.contains("list=")
+
+        // Быстрый путь для одиночного видео: метаданные из InnerTube
+        // (1–2 запроса) вместо yt-dlp -J (веб-страница + API, ~15–25 с).
+        // Плейлисты и live-трансляции идут полным путём через yt-dlp.
+        if !isPlaylist, let videoID = InnertubeClient.extractVideoID(from: argument) {
+            if let track = InnertubeClient.metadataSync(for: videoID, proxy: proxy) {
+                return [track]
+            }
+        }
+
         var arguments: [String]
         if isPlaylist {
             arguments = ["-J", "--skip-download", "--flat-playlist", "--playlist-items", "1:50"]

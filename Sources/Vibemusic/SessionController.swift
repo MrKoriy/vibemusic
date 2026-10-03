@@ -12,6 +12,10 @@ final class SessionController: ObservableObject {
 
     @Published private(set) var selectedCategoryID: String?
     @Published private(set) var isWaitingForStream = false
+    /// Намерение пользователя: сессия на паузе. Источник истины для
+    /// «таймер ↔ плеер»: пауза/плей меняют намерение, а не наблюдаемое
+    /// состояние AVPlayer (которое во время буферизации врёт).
+    @Published private(set) var isSessionPaused = false
     @Published var shuffle: Bool { didSet { defaults.set(shuffle, forKey: AppDefaults.Keys.shuffle) } }
     @Published var volume: Float { didSet { player.setVolume(volume); defaults.set(volume, forKey: AppDefaults.Keys.volume) } }
     @Published var sessionMinutes: Int { didSet { defaults.set(sessionMinutes, forKey: AppDefaults.Keys.sessionMinutes) } }
@@ -30,6 +34,7 @@ final class SessionController: ObservableObject {
     private var pending: PendingStart?
     private var activeSessionMode: SessionMode?
     private var fallbackTask: Task<Void, Never>?
+    private var warmupTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     private let defaults: UserDefaults
 
@@ -65,13 +70,57 @@ final class SessionController: ObservableObject {
         player.$isPlaying
             .receive(on: RunLoop.main)
             .sink { [weak self] playing in
-                if playing { self?.beginTimerWhenReady() }
+                self?.playbackStateChanged(playing: playing)
             }
             .store(in: &cancellables)
 
         player.setVolume(volume)
         if warmupEnabled, let firstCat = store.category(id: "work") ?? store.curated.first {
             player.warmup(category: firstCat)
+        }
+        if warmupEnabled {
+            warmupAllCategories()
+        }
+    }
+
+    /// Синхронизация таймера и плеера (фикс рассинхрона):
+    /// • заиграло — если пользователь на паузе, глушим (авто-next/гонки
+    ///   не воскрешают звук); если ждали стрим — стартуем таймер; если
+    ///   таймер заморожен буферизацией — размораживаем.
+    /// • стихло (буферизация, смена трека, stall) — замораживаем таймер,
+    ///   чтобы отсчёт не «хуярил», пока песня не играет.
+    func playbackStateChanged(playing: Bool) {
+        let sessionActive = timer.phase == .work || timer.phase == .breakPhase
+        if playing {
+            if isSessionPaused {
+                player.pause()
+            } else if pending != nil {
+                beginTimerWhenReady()
+            } else if sessionActive {
+                timer.unsuspend()
+            }
+        } else {
+            if !isSessionPaused, sessionActive, player.current != nil {
+                timer.suspend()
+            }
+        }
+    }
+
+    /// Прогрев первых треков всех категорий (кэш ссылок переживает
+    /// перезапуск): после старта приложения любой режим запускается
+    /// мгновенно. Один фоновый Innertube-запрос на категорию.
+    private func warmupAllCategories() {
+        let categories = store.allCategories
+        guard !categories.isEmpty else { return }
+        warmupTask?.cancel()
+        warmupTask = Task { [weak self] in
+            for category in categories {
+                guard let self, !Task.isCancelled else { return }
+                if let first = category.tracks.first {
+                    self.player.prefetch(track: first)
+                }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
         }
     }
 
@@ -98,6 +147,7 @@ final class SessionController: ObservableObject {
         selectedCategoryID = category.id
         let minutes = category.defaultMinutes
         sessionMinutes = minutes
+        isSessionPaused = false
         pending = PendingStart(minutes: minutes, mode: timerMode, breakMinutes: breakMinutes, sessionMode: category.mode)
         isWaitingForStream = true
         player.play(category: category, shuffle: shuffle)
@@ -107,17 +157,60 @@ final class SessionController: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             // Don't start timer if stream already failed (needsRetry set by PlayerCore.handleLoadFailure).
             guard !self.player.needsRetry else { return }
+            // Пользователь успел поставить паузу во время подготовки —
+            // таймер стартует после его resume (через playbackStateChanged).
+            guard !self.isSessionPaused else { return }
             self.beginTimerWhenReady()
         }
     }
 
     func toggleSession() {
+        // Подготовка стрима тоже «активная сессия»: пробел во время
+        // загрузки ставит паузу, а не перезапускает сессию с нуля.
+        if pending != nil || isWaitingForStream {
+            isSessionPaused ? resumeSession() : pauseSession()
+            return
+        }
         switch timer.phase {
         case .idle, .finished:
             startDefaultSession()
         default:
-            timer.togglePause()
-            player.toggle()
+            isSessionPaused ? resumeSession() : pauseSession()
+        }
+    }
+
+    /// Пауза по намерению: таймер и плеер останавливаются вместе.
+    public func pauseSession() {
+        isSessionPaused = true
+        timer.pause()
+        player.pause()
+    }
+
+    /// Снятие паузы: таймер и плеер продолжают вместе. Если стрим ещё
+    /// не готов (pending), таймер стартует автоматически при первом звуке.
+    public func resumeSession() {
+        guard isSessionPaused else { return }
+        isSessionPaused = false
+        player.resumePlayback()
+        if pending == nil {
+            timer.resume()
+        }
+    }
+
+    /// Явный play с медиа-клавиш/наушников: без активной сессии — старт,
+    /// с паузой — продолжение (никогда не перезапускает с нуля).
+    public func remotePlay() {
+        if timer.phase == .idle || timer.phase == .finished {
+            startDefaultSession()
+        } else {
+            resumeSession()
+        }
+    }
+
+    /// Явная пауза с медиа-клавиш: без активной сессии — no-op.
+    public func remotePause() {
+        if pending != nil || timer.phase == .work || timer.phase == .breakPhase {
+            pauseSession()
         }
     }
 
@@ -125,6 +218,7 @@ final class SessionController: ObservableObject {
         recordPartialWork()
         pending = nil
         isWaitingForStream = false
+        isSessionPaused = false
         activeSessionMode = nil
         fallbackTask?.cancel()
         fallbackTask = nil
@@ -150,6 +244,9 @@ final class SessionController: ObservableObject {
         sessionMinutes = minutes
         if timer.phase == .work {
             timer.start(minutes: minutes, mode: timerMode, breakMinutes: breakMinutes)
+            // Рестарт параметров не снимает паузу пользователя — иначе
+            // таймер потикал бы, пока плеер стоит (рассинхрон).
+            if isSessionPaused { timer.pause() }
         }
     }
 
@@ -158,6 +255,7 @@ final class SessionController: ObservableObject {
         if timer.phase == .work || timer.phase == .breakPhase {
             recordPartialWork()
             timer.start(minutes: sessionMinutes, mode: mode, breakMinutes: breakMinutes)
+            if isSessionPaused { timer.pause() }
         }
     }
 

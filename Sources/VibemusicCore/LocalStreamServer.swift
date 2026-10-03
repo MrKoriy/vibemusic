@@ -58,6 +58,14 @@ enum CurlFetcher {
         let body: Data
     }
 
+    /// Метод запроса: GET (по умолчанию) или POST с телом из файла.
+    /// Тело пишется во временный файл — креды прокси и большие тела
+    /// не попадают в argv процесса.
+    enum Method {
+        case get
+        case post(body: Data, contentType: String)
+    }
+
     static let maxConcurrentProcesses = 4
     private static let limiter = CurlSlotLimiter(limit: maxConcurrentProcesses)
     private static let watchdogQueue = DispatchQueue(label: "vibemusic.curl.watchdog")
@@ -66,6 +74,8 @@ enum CurlFetcher {
     /// curl-процессов, кооперативная отмена задачи завершает процесс.
     static func fetch(
         url: URL,
+        method: Method = .get,
+        headers: [String: String] = [:],
         range: (start: Int64, end: Int64)? = nil,
         proxy: String? = nil,
         timeout: TimeInterval
@@ -73,7 +83,14 @@ enum CurlFetcher {
         try await limiter.acquire()
         do {
             try Task.checkCancellation()
-            let response = try await runCurlProcess(url: url, range: range, proxy: proxy, timeout: timeout)
+            let response = try await runCurlProcess(
+                url: url,
+                method: method,
+                headers: headers,
+                range: range,
+                proxy: proxy,
+                timeout: timeout
+            )
             await limiter.release()
             return response
         } catch {
@@ -84,6 +101,8 @@ enum CurlFetcher {
 
     private static func runCurlProcess(
         url: URL,
+        method: Method,
+        headers: [String: String],
         range: (start: Int64, end: Int64)?,
         proxy: String?,
         timeout: TimeInterval
@@ -112,6 +131,21 @@ enum CurlFetcher {
             guard let line = configLine(proxy: proxy) else { throw URLError(.badURL) }
             stdinConfig = Data(line.utf8)
             arguments += ["-K", "-"]
+        }
+        // Заголовки запроса: не секреты (UA, visitor id), но экранируем кавычки.
+        for (key, value) in headers.sorted(by: { $0.key < $1.key }) {
+            let safeKey = key.replacingOccurrences(of: "\"", with: "")
+            let safeValue = value.replacingOccurrences(of: "\"", with: "\\\"")
+            arguments += ["-H", "\(safeKey): \(safeValue)"]
+        }
+        switch method {
+        case .get:
+            break
+        case .post(let body, let contentType):
+            let bodyPathFile = workDir.appendingPathComponent("request-body").path
+            try body.write(to: URL(fileURLWithPath: bodyPathFile))
+            let safeContentType = contentType.replacingOccurrences(of: "\"", with: "")
+            arguments += ["-X", "POST", "-H", "Content-Type: \(safeContentType)", "--data-binary", "@\(bodyPathFile)"]
         }
         if let range {
             arguments += ["-r", "\(range.start)-\(range.end)"]

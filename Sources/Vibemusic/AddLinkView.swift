@@ -145,7 +145,7 @@ struct AddLinkView: View {
             }
         }
         .padding(22)
-        .background(Color(red: 0.07, green: 0.06, blue: 0.15))
+        .background(Color(white: 0.045))
         .preferredColorScheme(.dark)
         .onDisappear {
             loadTask?.cancel()

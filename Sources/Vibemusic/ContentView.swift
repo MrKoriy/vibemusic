@@ -16,7 +16,7 @@ struct ContentView: View {
 
     private var selectedCategory: MusicCategory? { controller.selectedCategory }
     private var tint: Color {
-        selectedCategory.map { Theme.color(for: $0.id) } ?? .indigo
+        selectedCategory.map { Theme.color(for: $0.id) } ?? Theme.color(for: "work")
     }
 
     private var displayRemaining: TimeInterval {
@@ -54,35 +54,19 @@ struct ContentView: View {
                 // GlassEffectContainer НЕ оборачивает весь скролл: контейнер
                 // рассчитан на соседние мелкие формы, а весь контент с LazyVGrid
                 // внутри него уходит в бесконечный цикл пересчёта раскладки (98% CPU).
-                VStack(spacing: 26) {
+                VStack(spacing: 24) {
                     header
-                    ZStack {
-                        Circle()
-                            .fill(RadialGradient(colors: [tint.opacity(0.38), .clear], center: .center, startRadius: 0, endRadius: 270))
-                            .frame(width: 540, height: 540)
-                            .blur(radius: 30)
-                            .drawingGroup()
-                            .allowsHitTesting(false)
-                        TimerRing(
-                            remaining: displayRemaining,
-                            progress: displayProgress,
-                            tint: tint,
-                            phaseLabel: phaseLabel,
-                            subLabel: subLabel,
-                            cyclesLabel: (controller.timerMode == .pomodoro && timer.completedCycles > 0)
-                                ? "циклов завершено: \(timer.completedCycles)" : nil
-                        )
-                    }
+                    timerSection
                     sessionControls
                     durationRow
                     categoriesGrid
                     todayFooter
                     PlayerBar(player: player, controller: controller, volume: volumeBinding)
                 }
-                .padding(.horizontal, 30)
-                .padding(.top, 16)
-                .padding(.bottom, 28)
-                .frame(maxWidth: 940)
+                .padding(.horizontal, 34)
+                .padding(.top, 20)
+                .padding(.bottom, 30)
+                .frame(maxWidth: 920)
                 .frame(maxWidth: .infinity)
             }
             if let toast = player.statusText {
@@ -113,6 +97,254 @@ struct ContentView: View {
             }
         }
     }
+
+    // MARK: - Секции
+
+    private var header: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("VIBEMUSIC")
+                    .font(.system(size: 14, weight: .heavy))
+                    .tracking(5)
+                    .foregroundStyle(.white.opacity(0.95))
+                Text("фокус · медитация · сон")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.40))
+            }
+            Spacer()
+            HStack(spacing: 10) {
+                Button {
+                    controller.shuffle.toggle()
+                } label: {
+                    Image(systemName: "shuffle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(controller.shuffle ? tint : .white.opacity(0.62))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .glassCircle(diameter: 34)
+                .help("Перемешивание треков")
+                .accessibilityLabel("Перемешивание треков")
+                .accessibilityHint("Включает и выключает случайный порядок воспроизведения")
+
+                Button {
+                    isAdding = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .glassCircle(diameter: 34)
+                .help("Добавить ссылку из YouTube")
+                .accessibilityLabel("Добавить ссылку")
+                .accessibilityHint("Открывает окно добавления треков из YouTube")
+            }
+        }
+    }
+
+    private var timerSection: some View {
+        ZStack {
+            Circle()
+                .fill(RadialGradient(colors: [tint.opacity(0.14), .clear], center: .center, startRadius: 0, endRadius: 240))
+                .frame(width: 460, height: 460)
+                .blur(radius: 42)
+                .drawingGroup()
+                .allowsHitTesting(false)
+            TimerRing(
+                remaining: displayRemaining,
+                progress: displayProgress,
+                tint: tint,
+                phaseLabel: phaseLabel,
+                subLabel: subLabel,
+                cyclesLabel: (controller.timerMode == .pomodoro && timer.completedCycles > 0)
+                    ? "циклов завершено: \(timer.completedCycles)" : nil,
+                isRunning: player.isPlaying
+            )
+        }
+    }
+
+    private var sessionToggleAccessibilityLabel: String {
+        switch timer.phase {
+        case .work, .breakPhase:
+            return controller.isSessionPaused ? "Продолжить сессию" : "Приостановить сессию"
+        default:
+            return "Запустить сессию"
+        }
+    }
+
+    private var sessionControls: some View {
+        HStack(spacing: 26) {
+            PlayerButton(systemName: "arrow.counterclockwise", size: 46) {
+                controller.resetSession()
+            }
+            .help("Сбросить сессию")
+            .accessibilityLabel("Сбросить сессию")
+            .accessibilityHint("Останавливает таймер и воспроизведение")
+
+            PlayerButton(
+                systemName: sessionToggleIcon,
+                size: 70,
+                tint: tint.opacity(0.45)
+            ) {
+                controller.toggleSession()
+            }
+            .help("Старт / пауза (пробел)")
+            .accessibilityLabel(sessionToggleAccessibilityLabel)
+            .accessibilityHint("Запускает и ставит на паузу таймер с музыкой; работает и клавиша пробел")
+
+            PlayerButton(systemName: "forward.end.fill", size: 46) {
+                controller.skipPhase()
+            }
+            .help("Следующая фаза")
+            .accessibilityLabel("Следующая фаза")
+            .accessibilityHint("Переключает таймер на перерыв или следующий цикл")
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: controller.isSessionPaused)
+    }
+
+    private var sessionToggleIcon: String {
+        let active = timer.phase == .work || timer.phase == .breakPhase || controller.isWaitingForStream
+        let frozen = controller.isSessionPaused || timer.isFrozen
+        return active && !frozen ? "pause.fill" : "play.fill"
+    }
+
+    private var durationRow: some View {
+        HStack(spacing: 10) {
+            ModeSegmented(
+                options: [("Отсчёт", .countdown), ("Помодоро", .pomodoro)],
+                selection: controller.timerMode,
+                tint: tint
+            ) { controller.setMode($0) }
+
+            Spacer()
+
+            ForEach(AppDefaults.presetDurations, id: \.self) { minutes in
+                DurationChip(
+                    label: Theme.shortDuration(minutes),
+                    isSelected: controller.sessionMinutes == minutes,
+                    tint: tint
+                ) {
+                    controller.setDuration(minutes)
+                }
+            }
+
+            Menu {
+                ForEach(AppDefaults.allDurations, id: \.self) { minutes in
+                    Button("\(Theme.shortDuration(minutes)) (\(minutes) мин)") {
+                        controller.setDuration(minutes)
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? "ещё" : Theme.shortDuration(controller.sessionMinutes))
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? .white.opacity(0.55) : tint)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(.white.opacity(0.05)))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.75))
+                .contentShape(Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Другая длительность")
+
+            if controller.timerMode == .pomodoro {
+                Menu {
+                    ForEach(AppDefaults.breakChoices, id: \.self) { minutes in
+                        Button("\(minutes) мин") { controller.breakMinutes = minutes }
+                    }
+                } label: {
+                    Text("перерыв \(controller.breakMinutes) м")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+        }
+    }
+
+    private var categoriesGrid: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("РЕЖИМЫ")
+                .font(.system(size: 11, weight: .bold))
+                .tracking(3)
+                .foregroundStyle(.white.opacity(0.32))
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
+                spacing: 12
+            ) {
+                ForEach(store.allCategories) { category in
+                    CategoryTile(
+                        category: category,
+                        tint: Theme.color(for: category.id),
+                        isActive: controller.selectedCategoryID == category.id
+                    ) {
+                        handleTap(category)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var todayFooter: some View {
+        Group {
+            if stats.todayMinutes > 0 {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(tint.opacity(0.8))
+                    Text("Сегодня: \(Theme.timeString(TimeInterval(stats.todayMinutes * 60))) · серия \(stats.currentStreak) дн.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.50))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func toastView(_ message: String) -> some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow.opacity(0.9))
+                Text(message)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .liquidGlass(in: Capsule())
+            .padding(.bottom, 12)
+        }
+        .id(message)
+        .task(id: message) {
+            do {
+                try await Task.sleep(nanoseconds: 6_000_000_000)
+            } catch {
+                // Задача отменена: сообщение уже сменилось — новое не трогаем.
+                return
+            }
+            guard player.statusText == message else { return }
+            player.statusText = nil
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: player.statusText)
+        .allowsHitTesting(false)
+    }
+
+    // MARK: - Служебное
 
     /// Space = старт/пауза сессии. Локальный монитор keyDown срабатывает
     /// только на нажатие клавиши (не крутит runloop, в отличие от
@@ -150,251 +382,6 @@ struct ContentView: View {
         )
     }
 
-    private var header: some View {
-        ZStack {
-            HStack {
-                Spacer()
-                VStack(spacing: 3) {
-                    Text("VIBEMUSIC")
-                        .font(.system(size: 15, weight: .heavy))
-                        .tracking(6)
-                        .foregroundStyle(.white)
-                    Text("фокус · медитация · сон")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.55))
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-                .liquidGlass(in: Capsule())
-                Spacer()
-            }
-            HStack(spacing: 10) {
-                Button {
-                    controller.shuffle.toggle()
-                } label: {
-                    Image(systemName: "shuffle")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(controller.shuffle ? tint : .white.opacity(0.7))
-                        .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .glassCircle(diameter: 36)
-                .help("Перемешивание треков")
-                .accessibilityLabel("Перемешивание треков")
-                .accessibilityHint("Включает и выключает случайный порядок воспроизведения")
-
-                Button {
-                    isAdding = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .glassCircle(diameter: 36)
-                .help("Добавить ссылку из YouTube")
-                .accessibilityLabel("Добавить ссылку")
-                .accessibilityHint("Открывает окно добавления треков из YouTube")
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.leading, 96)
-    }
-
-    private var sessionToggleAccessibilityLabel: String {
-        switch timer.phase {
-        case .work, .breakPhase:
-            return timer.isPaused ? "Продолжить сессию" : "Приостановить сессию"
-        default:
-            return "Запустить сессию"
-        }
-    }
-
-    private var sessionControls: some View {
-        HStack(spacing: 22) {
-            PlayerButton(systemName: "arrow.counterclockwise", size: 46) {
-                controller.resetSession()
-            }
-            .help("Сбросить сессию")
-            .accessibilityLabel("Сбросить сессию")
-            .accessibilityHint("Останавливает таймер и воспроизведение")
-
-            PlayerButton(
-                systemName: timer.phase == .work || timer.phase == .breakPhase
-                    ? (timer.isPaused ? "play.fill" : "pause.fill")
-                    : "play.fill",
-                size: 72,
-                tint: tint.opacity(0.55)
-            ) {
-                controller.toggleSession()
-            }
-            .help("Старт / пауза (пробел)")
-            .accessibilityLabel(sessionToggleAccessibilityLabel)
-            .accessibilityHint("Запускает и ставит на паузу таймер с музыкой; работает и клавиша пробел")
-
-            PlayerButton(systemName: "forward.end.fill", size: 46) {
-                controller.skipPhase()
-            }
-            .help("Следующая фаза")
-            .accessibilityLabel("Следующая фаза")
-            .accessibilityHint("Переключает таймер на перерыв или следующий цикл")
-        }
-    }
-
-    private var durationRow: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 2) {
-                modeButton("Отсчёт", value: .countdown)
-                modeButton("Помодоро", value: .pomodoro)
-            }
-            .liquidGlass(in: Capsule())
-
-            Spacer()
-
-            ForEach(AppDefaults.presetDurations, id: \.self) { minutes in
-                DurationChip(
-                    label: Theme.shortDuration(minutes),
-                    isSelected: controller.sessionMinutes == minutes,
-                    tint: tint
-                ) {
-                    controller.setDuration(minutes)
-                }
-            }
-
-            Menu {
-                ForEach(AppDefaults.allDurations, id: \.self) { minutes in
-                    Button("\(Theme.shortDuration(minutes)) (\(minutes) мин)") {
-                        controller.setDuration(minutes)
-                    }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? "ещё" : Theme.shortDuration(controller.sessionMinutes))
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .foregroundStyle(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? .white.opacity(0.65) : tint)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(Capsule().fill(.white.opacity(0.06)))
-                .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
-                .contentShape(Capsule())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Другая длительность")
-
-            if controller.timerMode == .pomodoro {
-                Menu {
-                    ForEach(AppDefaults.breakChoices, id: \.self) { minutes in
-                        Button("\(minutes) мин") { controller.breakMinutes = minutes }
-                    }
-                } label: {
-                    Text("перерыв \(controller.breakMinutes) м")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-            }
-        }
-    }
-
-    private func modeButton(_ label: String, value: TimerEngine.Mode) -> some View {
-        let isSelected = controller.timerMode == value
-        return Button {
-            controller.setMode(value)
-        } label: {
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.5)))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(
-                    Capsule().fill(isSelected ? tint.opacity(0.45) : Color.clear)
-                )
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var categoriesGrid: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("РЕЖИМЫ")
-                .font(.system(size: 11, weight: .bold))
-                .tracking(3)
-                .foregroundStyle(.white.opacity(0.35))
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 148), spacing: 12)],
-                spacing: 12
-            ) {
-                ForEach(store.allCategories) { category in
-                    CategoryTile(
-                        category: category,
-                        tint: Theme.color(for: category.id),
-                        isActive: controller.selectedCategoryID == category.id
-                    ) {
-                        handleTap(category)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var todayFooter: some View {
-        Group {
-            if stats.todayMinutes > 0 {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(.white)
-                    Text("Сегодня: \(Theme.timeString(TimeInterval(stats.todayMinutes * 60))) · серия \(stats.currentStreak) дн.")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.8))
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .liquidGlass(in: Capsule())
-            }
-        }
-    }
-
-    private func toastView(_ message: String) -> some View {
-        VStack {
-            Spacer()
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.yellow)
-                Text(message)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .liquidGlass(in: Capsule())
-            .padding(.bottom, 12)
-        }
-        .id(message)
-        .task(id: message) {
-            do {
-                try await Task.sleep(nanoseconds: 6_000_000_000)
-            } catch {
-                // Задача отменена: сообщение уже сменилось — новое не трогаем.
-                return
-            }
-            guard player.statusText == message else { return }
-            player.statusText = nil
-        }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: player.statusText)
-        .allowsHitTesting(false)
-    }
-
     private var hiddenShortcuts: some View {
         Group {
             // Space обрабатывает локальный keyDown-монитор (installSpaceMonitor):
@@ -419,6 +406,8 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Плеер
+
 struct PlayerBar: View {
     @ObservedObject var player: PlayerCore
     @ObservedObject var controller: SessionController
@@ -428,14 +417,15 @@ struct PlayerBar: View {
     @State private var isScrubbing = false
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 14) {
             PlayerButton(systemName: "backward.fill", size: 36) { player.previous() }
                 .help("Предыдущий трек")
                 .accessibilityLabel("Предыдущий трек")
                 .accessibilityHint("Включает предыдущий трек очереди")
             PlayerButton(
                 systemName: player.isPlaying ? "pause.fill" : "play.fill",
-                size: 44
+                size: 46,
+                tint: Theme.color(for: controller.selectedCategoryID ?? "work").opacity(0.4)
             ) { controller.toggleSession() }
                 .help("Пауза сессии (Space)")
                 .accessibilityLabel(player.isPlaying ? "Приостановить сессию" : "Запустить сессию")
@@ -454,7 +444,7 @@ struct PlayerBar: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    if player.isLoading {
+                    if player.isLoading || player.isBuffering {
                         ProgressView()
                             .controlSize(.mini)
                     }
@@ -491,40 +481,45 @@ struct PlayerBar: View {
             Spacer()
 
             if player.duration > 0 {
-                Slider(
-                    value: $scrub,
-                    in: 0...max(player.duration, 1),
-                    onEditingChanged: { editing in
-                        isScrubbing = editing
-                        if !editing { player.seek(to: scrub) }
+                GlassSlider(
+                    value: isScrubbing ? scrub : player.elapsed,
+                    range: 0...max(player.duration, 1),
+                    tint: .white,
+                    onScrub: { newValue in
+                        if !isScrubbing { isScrubbing = true }
+                        scrub = newValue
+                    },
+                    onCommit: { newValue in
+                        isScrubbing = false
+                        player.seek(to: newValue)
                     }
                 )
                 .frame(width: 170)
-                .controlSize(.small)
                 .accessibilityLabel("Позиция воспроизведения")
-                .onChange(of: player.elapsed) { _, newValue in
-                    if !isScrubbing { scrub = newValue }
-                }
                 Text("\(Theme.timeString(player.elapsed)) / \(Theme.timeString(player.duration))")
                     .font(.system(size: 10, weight: .medium))
                     .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.4))
-                    .frame(width: 110, alignment: .trailing)
+                    .foregroundStyle(.white.opacity(0.38))
+                    .frame(width: 106, alignment: .trailing)
             }
 
             HStack(spacing: 8) {
-                Image(systemName: "speaker.wave.2.fill")
+                Image(systemName: volume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.5))
-                Slider(value: $volume, in: 0...1)
-                    .frame(width: 100)
-                    .controlSize(.small)
-                    .accessibilityLabel("Громкость")
-                    .accessibilityHint("Регулирует громкость воспроизведения")
+                    .foregroundStyle(.white.opacity(0.42))
+                GlassSlider(
+                    value: volume,
+                    range: 0...1,
+                    tint: .white.opacity(0.7),
+                    onScrub: { controller.setVolume(Float($0)) }
+                )
+                .frame(width: 92)
+                .accessibilityLabel("Громкость")
+                .accessibilityHint("Регулирует громкость воспроизведения")
             }
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 14)
-        .liquidGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .padding(.vertical, 13)
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }

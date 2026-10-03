@@ -1,7 +1,9 @@
 import SwiftUI
 
 extension View {
-    /// Liquid-glass: материал + световой ободок + блик сверху + мягкая тень.
+    /// Liquid-glass: материал + тонкий световой ободок + деликатный блик.
+    /// Мягче прежнего: ободок и блик слабее — стекло читается как материал,
+    /// а не как рамка со свечением.
     @ViewBuilder
     func liquidGlass<S: Shape>(
         in shape: S,
@@ -22,23 +24,23 @@ extension View {
             } else {
                 self.background(
                     shape.fill(.ultraThinMaterial)
-                        .shadow(color: .black.opacity(0.22), radius: 12, y: 8)
+                        .shadow(color: .black.opacity(0.28), radius: 16, y: 10)
                 )
             }
             #else
             self.background(
                 shape.fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.22), radius: 12, y: 8)
+                    .shadow(color: .black.opacity(0.28), radius: 16, y: 10)
             )
             #endif
         }
         .overlay(
             shape.stroke(
                 LinearGradient(
-                    colors: [.white.opacity(0.70), .white.opacity(0.06)],
+                    colors: [.white.opacity(0.32), .white.opacity(0.04)],
                     startPoint: .topLeading, endPoint: .bottomTrailing
                 ),
-                lineWidth: 1
+                lineWidth: 0.75
             )
             .allowsHitTesting(false)
         )
@@ -48,9 +50,9 @@ extension View {
                     shape.fill(
                         LinearGradient(
                             stops: [
-                                .init(color: .white.opacity(0.30), location: 0.0),
-                                .init(color: .white.opacity(0.06), location: 0.42),
-                                .init(color: .white.opacity(0.0), location: 0.55),
+                                .init(color: .white.opacity(0.12), location: 0.0),
+                                .init(color: .white.opacity(0.03), location: 0.35),
+                                .init(color: .white.opacity(0.0), location: 0.5),
                             ],
                             startPoint: .top, endPoint: .bottom
                         )
