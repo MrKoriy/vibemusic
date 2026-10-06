@@ -132,7 +132,7 @@ struct GeneralSettingsTab: View {
             let start = Date()
             do {
                 _ = try await Task.detached(priority: .userInitiated) {
-                    try YTResolver.streamURL(for: "hLFtwxEqO-w", proxy: toolURL)
+                    try await YTResolver.streamURL(for: "hLFtwxEqO-w", proxy: toolURL)
                 }.value
                 await MainActor.run {
                     proxyTestResult = "OK за \(String(format: "%.1f", Date().timeIntervalSince(start)))с"

@@ -135,7 +135,7 @@ enum CLIBootstrap {
             case .resolve(let target):
                 runDetached(proxyOverride: proxyOverride) { proxy in
                     do {
-                        print(try YTResolver.streamURL(for: target, proxy: proxy).absoluteString)
+                        print(try await YTResolver.streamURL(for: target, proxy: proxy).absoluteString)
                     } catch {
                         fail(error)
                     }
@@ -143,7 +143,7 @@ enum CLIBootstrap {
             case .meta(let source):
                 runDetached(proxyOverride: proxyOverride) { proxy in
                     do {
-                        let tracks = try YTResolver.importTracks(from: source, proxy: proxy)
+                        let tracks = try await YTResolver.importTracks(from: source, proxy: proxy)
                         for track in tracks {
                             print("\(track.id) | \(track.title) | \(track.channel ?? "-") | \(track.durationLabel ?? "live")")
                         }
@@ -159,11 +159,11 @@ enum CLIBootstrap {
     }
 
     /// Одиночная detached-команда без таймеров: блокирует поток до завершения.
-    private static func runDetached(proxyOverride: String?, _ body: @escaping @Sendable (String?) -> Void) {
+    private static func runDetached(proxyOverride: String?, _ body: @escaping @Sendable (String?) async -> Void) {
         let effectiveProxy = proxyOverride ?? ProxyConfig.load().toolURL
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
-            body(effectiveProxy)
+            await body(effectiveProxy)
             semaphore.signal()
         }
         semaphore.wait()
@@ -228,7 +228,7 @@ enum CLIBootstrap {
                 let viaProxy: Bool
                 if let proxyOverride {
                     // Явный --proxy: проверяем именно этот маршрут.
-                    url = try YTResolver.streamURL(for: videoID, proxy: proxyOverride)
+                    url = try await YTResolver.streamURL(for: videoID, proxy: proxyOverride)
                     viaProxy = true
                     print("RESOLVED_IN \(String(format: "%.1f", Date().timeIntervalSince(resolveStart)))s [proxy]")
                 } else {

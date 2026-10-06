@@ -242,7 +242,7 @@ struct AddLinkView: View {
             do {
                 let proxy = ProxyConfig.load().toolURL
                 let worker = Task.detached(priority: .userInitiated) {
-                    try YTResolver.importTracks(from: raw, proxy: proxy, playlist: playlistFlag)
+                    try await YTResolver.importTracks(from: raw, proxy: proxy, playlist: playlistFlag)
                 }
                 let tracks = try await withTaskCancellationHandler {
                     try await worker.value

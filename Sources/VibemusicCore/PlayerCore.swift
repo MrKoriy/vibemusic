@@ -4,7 +4,13 @@ import Combine
 import os
 
 private final class FadeState: @unchecked Sendable {
-    var steps = 16
+    let totalSteps: Int
+    var steps: Int
+
+    init(totalSteps: Int) {
+        self.totalSteps = totalSteps
+        self.steps = totalSteps
+    }
 }
 
 /// Плеер без гонок: любое переключение (play/next/previous/stop/reset)
@@ -31,18 +37,34 @@ public final class PlayerCore: ObservableObject {
     @Published public private(set) var needsRetry = false
     @Published public var statusText: String?
     @Published public var volume: Float = 0.85 {
-        didSet { player.volume = volume }
+        didSet { applyVolume() }
     }
+    /// Множитель громкости поверх пользовательской (0…1): плавное затухание
+    /// в конце сессии сна. Пользовательская `volume` при этом не меняется.
+    @Published public private(set) var attenuation: Float = 1
+    /// Громкость, которая реально уходит в AVPlayer.
+    public var effectiveVolume: Float { volume * attenuation }
     @Published public private(set) var playIntent: PlayIntent = .playing
 
     /// DI-хук для тестов: резолв ссылки на поток.
     public var resolve: (String, String?) async throws -> (URL, Bool) = { videoID, proxy in
         try await YTResolver.firstSuccess(videoID: videoID, proxy: proxy)
     }
+    /// DI-хук для тестов: кэш ссылок, который чистится при неудачах.
+    public var cache: StreamURLCache = .shared
+
+    /// Длительность fade-out по умолчанию (`stop(fade: true)`).
+    public static let defaultFadeDuration: TimeInterval = 12
+    static let fadeStepInterval: TimeInterval = 0.2
+    /// Сколько раз подряд пытаться продолжить упавший посреди трека поток
+    /// (истёкшая HLS-ссылка, обрыв сети) с той же позиции.
+    nonisolated static let maxRecoveryAttempts = 2
+    /// Падение раньше этой позиции считается неудачей загрузки, а не обрывом.
+    nonisolated static let recoveryMinPosition: Double = 5
 
     private let logger = Logger(subsystem: "com.vibemusic.app", category: "player")
     /// Отладка в stderr при VIBEMUSIC_DEBUG (см. StreamHub.log).
-    nonisolated(unsafe) static let VIBEMUSIC_DEBUG_ENABLED = ProcessInfo.processInfo.environment["VIBEMUSIC_DEBUG"] != nil
+    nonisolated static let VIBEMUSIC_DEBUG_ENABLED = ProcessInfo.processInfo.environment["VIBEMUSIC_DEBUG"] != nil
     nonisolated static func debugLog(_ message: String) {
         guard VIBEMUSIC_DEBUG_ENABLED else { return }
         let t = Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1000)
@@ -65,9 +87,17 @@ public final class PlayerCore: ObservableObject {
     /// бесконечно (и каждые 1,5 с запускать yt-dlp), когда не играет ничего.
     private var consecutiveFailures = 0
     static let maxConsecutiveFailures = 5
+    /// Попытки восстановления текущего трека (см. maxRecoveryAttempts).
+    private var recoveryAttempts = 0
+    /// Позиция последнего восстановления: защита от цикла «обрыв → резолв».
+    private var lastRecoveryPosition: Double = -.infinity
+    /// Треки, которые прямо сейчас резолвятся префетчем.
+    private var prefetchInFlight = Set<String>()
+    /// Позиция, на которую нужно перемотать после готовности нового item.
+    private var pendingResumePosition: Double?
 
     public init() {
-        player.volume = volume
+        player.volume = effectiveVolume
         // true: AVPlayer начинает воспроизведение, как только декодер готов,
         // но не раньше — при waits=false замена item + немедленный play()
         // в контексте NSApplication оставляли плеер в состоянии «rate=1,
@@ -158,6 +188,7 @@ public final class PlayerCore: ObservableObject {
         cancelPlayback()
         consecutiveFailures = 0
         playIntent = .playing
+        setAttenuation(1)
         queue = shuffle ? category.tracks.shuffled() : category.tracks
         index = 0
         loadCurrent()
@@ -184,6 +215,11 @@ public final class PlayerCore: ObservableObject {
         needsRetry = false
         consecutiveFailures = 0
         cancelPlayback()
+        // Повтор обязан идти за свежей ссылкой: в кэше могла остаться та,
+        // что только что не сработала (смена сети, 403).
+        if queue.indices.contains(index) {
+            cache.invalidate(videoID: queue[index].id)
+        }
         loadCurrent()
     }
 
@@ -216,10 +252,24 @@ public final class PlayerCore: ObservableObject {
         volume = value
     }
 
-    public func stop(fade: Bool) {
+    /// Множитель громкости (0…1) поверх пользовательской. Во время активного
+    /// fade-out не трогаем AVPlayer: fade сам ведёт громкость к нулю.
+    public func setAttenuation(_ value: Float) {
+        let clamped = min(max(value, 0), 1)
+        guard clamped != attenuation else { return }
+        attenuation = clamped
+        applyVolume()
+    }
+
+    private func applyVolume() {
+        guard fadeTimer == nil else { return }
+        player.volume = effectiveVolume
+    }
+
+    public func stop(fade: Bool, duration: TimeInterval = PlayerCore.defaultFadeDuration) {
         if fade, player.currentItem != nil {
             let generation = prepareFade()
-            runFade(generation: generation)
+            runFade(generation: generation, duration: duration)
         } else {
             cancelPlayback()
             player.pause()
@@ -240,6 +290,8 @@ public final class PlayerCore: ObservableObject {
         isPlaying = false
         isBuffering = false
         playIntent = .playing
+        recoveryAttempts = 0
+        setAttenuation(1)
     }
 
     // MARK: - Отмена и fade
@@ -261,11 +313,12 @@ public final class PlayerCore: ObservableObject {
         }
         prewarmTasks.removeAll()
         itemCancellables.removeAll()
+        pendingResumePosition = nil
         if fadeTimer != nil {
             fadeTimer?.invalidate()
             fadeTimer = nil
             // Прерванный fade обязан вернуть громкость.
-            player.volume = volume
+            player.volume = effectiveVolume
         }
         if let activeStream {
             StreamHub.shared.closeStream(activeStream)
@@ -279,11 +332,12 @@ public final class PlayerCore: ObservableObject {
         return playbackGeneration
     }
 
-    private func runFade(generation: UUID) {
-        let originalVolume = volume
+    private func runFade(generation: UUID, duration: TimeInterval) {
+        let originalVolume = effectiveVolume
         player.volume = originalVolume
-        let state = FadeState()
-        fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        let state = FadeState(totalSteps: max(1, Int((duration / Self.fadeStepInterval).rounded())))
+        // Режим .common: fade не замирает, пока открыто меню или идёт скролл.
+        let timer = Timer(timeInterval: Self.fadeStepInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let timer = self.fadeTimer else { return }
                 // Устаревшее поколение = начато новое воспроизведение — fade молчит.
@@ -299,29 +353,41 @@ public final class PlayerCore: ObservableObject {
                     self.fadeTimer = nil
                     self.logger.info("fade завершён, пауза")
                 } else {
-                    self.player.volume = originalVolume * (Float(state.steps) / 16.0)
+                    // Квадратичная кривая: на слух затухание равномернее линейного.
+                    let fraction = Float(state.steps) / Float(state.totalSteps)
+                    self.player.volume = originalVolume * fraction * fraction
                 }
             }
         }
+        fadeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // MARK: - Загрузка текущего трека
 
-    private func loadCurrent() {
+    /// Загрузка трека из очереди. `resumeAt` — восстановление после обрыва:
+    /// тот же трек, свежая ссылка, перемотка на сохранённую позицию.
+    private func loadCurrent(resumeAt: Double? = nil) {
         guard queue.indices.contains(index) else { return }
         let track = queue[index]
+        if resumeAt == nil {
+            recoveryAttempts = 0
+            lastRecoveryPosition = -.infinity
+        }
         current = track
         isLoading = true
-        statusText = nil
+        statusText = resumeAt == nil ? nil : "Поток оборвался, продолжаю…"
         let expectedID = track.id
         let generation = playbackGeneration
-        logger.info("загрузка «\(track.title, privacy: .public)»")
+        // Live-трансляцию перематывать некуда: просто переподключаемся.
+        pendingResumePosition = track.isLive ? nil : resumeAt
+        logger.info("загрузка «\(track.title, privacy: .public)»\(resumeAt != nil ? " (восстановление)" : "", privacy: .public)")
 
         loadTask = Task { [weak self] in
             guard let self else { return }
             let resolveStart = Date()
             do {
-                let proxyTool = ProxyConfig.load().toolURL
+                let proxyTool = ProxyConfig.current().toolURL
                 let raced = try await self.resolve(expectedID, proxyTool)
                 // Поколение сменилось (reset/next/stop) — результат неактуален.
                 guard !Task.isCancelled,
@@ -338,9 +404,7 @@ public final class PlayerCore: ObservableObject {
                     // Когда ссылка истечёт посреди многочасового трека,
                     // стрим сам получит новую тем же маршрутом.
                     let refresher: LocalStream.UpstreamRefresher = {
-                        try await Task.detached(priority: .userInitiated) {
-                            try YTResolver.streamURL(for: expectedID, proxy: streamProxy)
-                        }.value
+                        try await YTResolver.streamURL(for: expectedID, proxy: streamProxy)
                     }
                     let stream = try await Task.detached(priority: .userInitiated) {
                         try StreamHub.shared.openStream(upstream: raced.0, proxy: streamProxy, refresher: refresher)
@@ -371,16 +435,33 @@ public final class PlayerCore: ObservableObject {
                     .receive(on: RunLoop.main)
                     .sink { [weak self] status in
                         guard let self,
-                              status == .failed,
                               generation == self.playbackGeneration,
                               self.current?.id == expectedID else { return }
-                        self.logger.warning("item failed, переключение")
-                        self.handleLoadFailure(trackID: expectedID, slow: false)
+                        switch status {
+                        case .readyToPlay:
+                            self.applyPendingResume(to: item)
+                        case .failed:
+                            self.handleItemFailure(trackID: expectedID, reason: "item failed")
+                        default:
+                            break
+                        }
+                    }
+                    .store(in: &self.itemCancellables)
+
+                // Обрыв посреди воспроизведения (истёкшие HLS-сегменты,
+                // потеря сети): status при этом может остаться readyToPlay.
+                NotificationCenter.default.publisher(for: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+                    .receive(on: RunLoop.main)
+                    .sink { [weak self] _ in
+                        guard let self,
+                              generation == self.playbackGeneration,
+                              self.current?.id == expectedID else { return }
+                        self.handleItemFailure(trackID: expectedID, reason: "failed to play to end")
                     }
                     .store(in: &self.itemCancellables)
 
                 self.player.replaceCurrentItem(with: item)
-                self.player.volume = self.volume
+                self.player.volume = self.effectiveVolume
                 Self.debugLog("item заменён (manifest=\(YTResolver.isManifestURL(raced.0)))")
                 // Пауза пользователя сильнее автозапуска: трек загружен,
                 // но звук включится только после resume.
@@ -399,6 +480,8 @@ public final class PlayerCore: ObservableObject {
                        self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
                         self.logger.warning("stall 14с, переключение")
                         self.statusText = "Поток не отвечает, переключаюсь…"
+                        // Ссылка не ответила — при возврате к треку резолвим заново.
+                        self.cache.invalidate(videoID: expectedID)
                         self.next()
                     }
                 }
@@ -406,6 +489,8 @@ public final class PlayerCore: ObservableObject {
                 guard !Task.isCancelled,
                       generation == self.playbackGeneration else { return }
                 let resolveSeconds = Date().timeIntervalSince(resolveStart)
+                // Ссылка могла прийти из кэша и оказаться мёртвой (openStream упал).
+                self.cache.invalidate(videoID: expectedID)
                 if let resolverError = error as? ResolverError, case .ytDlpMissing = resolverError {
                     self.statusText = resolverError.errorDescription
                 } else {
@@ -417,6 +502,47 @@ public final class PlayerCore: ObservableObject {
                 self.isLoading = false
             }
         }
+    }
+
+    /// Перемотка восстановленного трека на позицию обрыва (один раз).
+    private func applyPendingResume(to item: AVPlayerItem) {
+        guard let position = pendingResumePosition else { return }
+        pendingResumePosition = nil
+        let itemDuration = item.duration.seconds
+        let target = (itemDuration.isFinite && itemDuration > 0) ? min(position, max(0, itemDuration - 1)) : position
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        statusText = nil
+        logger.info("восстановление: перемотка на \(target, format: .fixed(precision: 0))с")
+    }
+
+    /// Падение item. Мёртвую ссылку убираем из кэша всегда. Если трек уже
+    /// играл (обрыв посреди, типично для истёкших HLS-ссылок многочасовых
+    /// треков), получаем свежую ссылку и продолжаем с той же позиции, а не
+    /// перескакиваем на следующий трек.
+    private func handleItemFailure(trackID: String, reason: String) {
+        cache.invalidate(videoID: trackID)
+        let position = elapsed
+        // После восстановления трек проиграл ещё минуту и больше: это новый
+        // независимый обрыв, счётчик попыток начинаем заново.
+        if position - lastRecoveryPosition > 60 {
+            recoveryAttempts = 0
+        }
+        if Self.shouldRecover(position: position, attempts: recoveryAttempts) {
+            recoveryAttempts += 1
+            lastRecoveryPosition = position
+            logger.warning("\(reason, privacy: .public) на \(position, format: .fixed(precision: 0))с, восстановление #\(self.recoveryAttempts)")
+            cancelPlayback()
+            loadCurrent(resumeAt: position)
+            return
+        }
+        logger.warning("\(reason, privacy: .public), переключение")
+        handleLoadFailure(trackID: trackID, slow: false)
+    }
+
+    /// Чистое правило: восстанавливаем только трек, который реально играл,
+    /// и не больше maxRecoveryAttempts раз подряд.
+    nonisolated static func shouldRecover(position: Double, attempts: Int) -> Bool {
+        position >= recoveryMinPosition && attempts < maxRecoveryAttempts
     }
 
     /// Единая обработка неудачи загрузки (аудит A-7, B-9).
@@ -478,12 +604,21 @@ public final class PlayerCore: ObservableObject {
         }
     }
 
+    /// Фоновый резолв в кэш. Только быстрый InnerTube-путь: если он не
+    /// сработал, тяжёлый yt-dlp запустится лишь при реальном воспроизведении.
+    /// Один и тот же трек не резолвится параллельно дважды.
     public func prefetch(track: Track) {
-        let fingerprint = ProxyConfig.load().fingerprint
-        if StreamURLCache.shared.get(videoID: track.id, route: fingerprint) != nil { return }
-        Task.detached(priority: .utility) {
-            let proxyTool = ProxyConfig.load().toolURL
-            _ = try? await YTResolver.firstSuccess(videoID: track.id, proxy: proxyTool)
+        let config = ProxyConfig.current()
+        if cache.get(videoID: track.id, route: config.fingerprint) != nil { return }
+        guard !prefetchInFlight.contains(track.id) else { return }
+        prefetchInFlight.insert(track.id)
+        let videoID = track.id
+        let proxyTool = config.toolURL
+        Task.detached(priority: .utility) { [weak self] in
+            _ = try? await YTResolver.firstSuccess(videoID: videoID, proxy: proxyTool, allowSlowFallback: false)
+            await MainActor.run { [weak self] in
+                _ = self?.prefetchInFlight.remove(videoID)
+            }
         }
     }
 

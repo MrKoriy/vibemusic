@@ -80,6 +80,25 @@ public final class StreamURLCache: @unchecked Sendable {
         saveAsync()
     }
 
+    /// Удаляет запись: ссылка оказалась мёртвой (403, item failed, stall).
+    /// Без этого retry/autoNext снова получали бы ту же ссылку до её expire.
+    public func invalidate(videoID: String) {
+        lock.lock()
+        let removed = entries.removeValue(forKey: videoID) != nil
+        lock.unlock()
+        if removed { saveAsync() }
+    }
+
+    /// Полный сброс: сменилась сеть (Wi‑Fi, VPN), а ссылки googlevideo
+    /// привязаны к IP, так что все записи потенциально мёртвые.
+    public func removeAll() {
+        lock.lock()
+        let hadEntries = !entries.isEmpty
+        entries.removeAll()
+        lock.unlock()
+        if hadEntries { saveAsync() }
+    }
+
     static func parseExpiry(from url: URL) -> TimeInterval? {
         let str = url.absoluteString
         if let range = str.range(of: "expire/([0-9]{9,12})", options: .regularExpression) {

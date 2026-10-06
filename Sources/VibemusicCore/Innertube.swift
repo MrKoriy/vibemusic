@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import os
 
 /// Быстрый путь резолва YouTube: один-два запроса к InnerTube player API.
@@ -36,20 +37,15 @@ enum InnertubeClient {
 
     /// Visitor data переживает один ответ LOGIN_REQUIRED и переиспользуется:
     /// первый резолв за запуск — два запроса, остальные — один.
-    private static let visitorLock = NSLock()
-    nonisolated(unsafe) private static var _visitorData: String?
+    private static let storedVisitorData = Mutex<String?>(nil)
 
     static var visitorData: String? {
-        visitorLock.lock()
-        defer { visitorLock.unlock() }
-        return _visitorData
+        storedVisitorData.withLock { $0 }
     }
 
     static func storeVisitorData(_ value: String?) {
         guard let value, !value.isEmpty else { return }
-        visitorLock.lock()
-        _visitorData = value
-        visitorLock.unlock()
+        storedVisitorData.withLock { $0 = value }
     }
 
     // MARK: - Публичный API
@@ -164,27 +160,6 @@ enum InnertubeClient {
             liveFlag: response.isLive ? true : nil,
             source: .user
         )
-    }
-
-    /// Синхронная обёртка для легаси-вызовов (CLI, importTracks).
-    static func metadataSync(for videoID: String, proxy: String?) -> Track? {
-        let box = ResultBox()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
-            box.value = try? await metadata(for: videoID, proxy: proxy)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return box.value
-    }
-
-    private final class ResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stored: Track?
-        var value: Track? {
-            get { lock.lock(); defer { lock.unlock() }; return stored }
-            set { lock.lock(); stored = newValue; lock.unlock() }
-        }
     }
 
     // MARK: - Транспорт
@@ -360,7 +335,7 @@ enum InnertubeClient {
     }
 
     static func isVideoID(_ value: String) -> Bool {
-        value.count == 11 && value.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
+        YTResolver.isVideoID(value)
     }
 }
 

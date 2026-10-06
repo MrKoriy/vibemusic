@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import os
 
 public enum ResolverError: LocalizedError {
@@ -40,9 +41,10 @@ public enum YTResolver {
         if Bundle.main.bundlePath.hasSuffix(".app") {
             paths.append(Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/yt-dlp").path)
         }
-        let projectBuildHelper = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("build/yt-dlp").path
-        paths.append(projectBuildHelper)
+        // Dev-сборка: build/yt-dlp ищем вверх от самого бинарника (и от бандла
+        // модуля для `swift test`), а не от текущей папки: иначе запуск CLI
+        // из чужой директории исполнил бы подложенный ./build/yt-dlp.
+        paths.append(contentsOf: devHelperCandidates())
         paths.append(contentsOf: [
             "/opt/homebrew/bin/yt-dlp",
             "/usr/local/bin/yt-dlp",
@@ -51,25 +53,53 @@ public enum YTResolver {
         ])
         return paths
     }()
-    private static let pathLock = NSLock()
-    nonisolated(unsafe) private static var _cachedPath: String?
+    /// Кандидаты `<предок>/build/yt-dlp` для запуска из .build/<config>/
+    /// (не больше 6 уровней вверх от бинарника и от бандла VibemusicCore).
+    static func devHelperCandidates(
+        roots: [URL?] = [
+            Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent(),
+            Bundle(for: StreamURLCache.self).bundleURL.deletingLastPathComponent(),
+        ],
+        maxDepth: Int = 6
+    ) -> [String] {
+        var result: [String] = []
+        for root in roots.compactMap({ $0 }) {
+            var dir = root.standardizedFileURL
+            for _ in 0..<maxDepth {
+                let candidate = dir.appendingPathComponent("build/yt-dlp").path
+                if !result.contains(candidate) { result.append(candidate) }
+                let parent = dir.deletingLastPathComponent()
+                if parent.path == dir.path { break }
+                dir = parent
+            }
+        }
+        return result
+    }
+
+    private static let cachedPath = Mutex<String?>(nil)
+
+    /// Не больше трёх yt-dlp одновременно: каждый процесс тяжёлый (Python,
+    /// веб-страница ~1,5 МБ), а без лимита прогрев категорий запускал 15+.
+    static let maxConcurrentProcesses = 3
+    private static let processLimiter = ProcessSlotLimiter(limit: maxConcurrentProcesses)
+    /// Отдельная очередь: блокирующее ожидание Process не занимает потоки
+    /// кооперативного пула Swift Concurrency (их столько же, сколько ядер).
+    private static let processQueue = DispatchQueue(
+        label: "vibemusic.ytdlp.process",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
 
     public static func ytDlpPath() -> String? {
-        pathLock.lock()
-        if let path = _cachedPath {
-            pathLock.unlock()
-            return path
+        if let path = cachedPath.withLock({ $0 }) { return path }
+        guard let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            return nil
         }
-        pathLock.unlock()
-        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            pathLock.lock()
-            // Re-check after acquiring lock — another thread may have set it.
-            if _cachedPath == nil { _cachedPath = candidate }
-            let resolved = _cachedPath ?? candidate
-            pathLock.unlock()
-            return resolved
+        // Другой поток мог успеть первым — возвращаем то, что закэшировано.
+        return cachedPath.withLock { stored in
+            if stored == nil { stored = found }
+            return stored ?? found
         }
-        return nil
     }
 
     /// Содержимое конфига yt-dlp с прокси. Логин/пароль прокси не должны
@@ -107,7 +137,46 @@ public enum YTResolver {
         return dir
     }
 
-    private static func run(_ arguments: [String], timeout: TimeInterval, proxy: String? = nil) throws -> String {
+    /// Асинхронный запуск yt-dlp: слот лимитера + ожидание процесса на
+    /// отдельной GCD-очереди. Отмена задачи завершает процесс сразу.
+    static func runAsync(_ arguments: [String], timeout: TimeInterval, proxy: String? = nil) async throws -> String {
+        try await processLimiter.acquire()
+        let flag = CancelFlag()
+        do {
+            let output = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, any Error>) in
+                    processQueue.async {
+                        do {
+                            continuation.resume(returning: try run(
+                                arguments,
+                                timeout: timeout,
+                                proxy: proxy,
+                                isCancelled: { flag.isSet }
+                            ))
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+            } onCancel: {
+                flag.set()
+            }
+            await processLimiter.release()
+            return output
+        } catch {
+            await processLimiter.release()
+            throw error
+        }
+    }
+
+    /// Синхронный запуск. Вызывать только вне кооперативного пула
+    /// (из `runAsync`): ожидание процесса блокирует поток.
+    private static func run(
+        _ arguments: [String],
+        timeout: TimeInterval,
+        proxy: String? = nil,
+        isCancelled: () -> Bool
+    ) throws -> String {
         guard let path = ytDlpPath() else { throw ResolverError.ytDlpMissing }
         var arguments = arguments
         var proxyDir: URL?
@@ -165,7 +234,7 @@ public enum YTResolver {
         while true {
             if exited.wait(timeout: .now() + 0.25) == .success { break }
             if !task.isRunning { break }
-            if Task.isCancelled {
+            if isCancelled() {
                 watchdog.cancel()
                 task.terminate()
                 throw CancellationError()
@@ -186,7 +255,9 @@ public enum YTResolver {
         return String(data: outBox.data, encoding: .utf8) ?? ""
     }
 
-    public static func streamURL(for videoID: String, proxy: String? = nil) throws -> URL {
+    /// Полный резолв через yt-dlp (~15–25 с). Процесс ждётся вне
+    /// кооперативного пула и через общий лимитер.
+    public static func streamURL(for videoID: String, proxy: String? = nil) async throws -> URL {
         // Только ID видео или ссылка YouTube: строка вида `--exec=…` не должна
         // превратиться в опцию yt-dlp (защита от подстановки аргументов).
         let target = try sanitizedSource(videoID)
@@ -212,7 +283,7 @@ public enum YTResolver {
         }
         // `--` — конец опций: дальше yt-dlp трактует аргумент только как URL/ID.
         arguments += ["--", target]
-        let output = try run(arguments, timeout: 50, proxy: proxy)
+        let output = try await runAsync(arguments, timeout: 50, proxy: proxy)
         guard let line = output.split(separator: "\n").first(where: { !$0.isEmpty }),
               let url = URL(string: String(line)) else {
             throw ResolverError.noStream
@@ -224,15 +295,18 @@ public enum YTResolver {
     /// при неудаче — yt-dlp (веб-страница + player API, ~15–25 с).
     /// Отмена задачи (гонка маршрутов, смена трека) пробрасывается наверх,
     /// чтобы проигравший не тащил за собой медленный резервный путь.
-    private static func resolveRoute(videoID: String, proxy: String?) async throws -> URL {
+    /// `allowSlowFallback == false` (префетч, прогрев) — без yt-dlp: фоновые
+    /// задачи не должны запускать тяжёлые процессы, когда InnerTube недоступен.
+    private static func resolveRoute(videoID: String, proxy: String?, allowSlowFallback: Bool) async throws -> URL {
         do {
             return try await InnertubeClient.audioStream(for: videoID, proxy: proxy)
         } catch is CancellationError {
             throw CancellationError()
         } catch let fastError {
             if Task.isCancelled { throw CancellationError() }
+            guard allowSlowFallback else { throw fastError }
             logger.log("fast path failed, fallback to yt-dlp: \(String(describing: fastError), privacy: .public)")
-            return try streamURL(for: videoID, proxy: proxy)
+            return try await streamURL(for: videoID, proxy: proxy)
         }
     }
 
@@ -241,10 +315,15 @@ public enum YTResolver {
     /// direct — только прямая, auto — гонка, побеждает первый успешный.
     /// Маршрут важен: ссылка googlevideo привязана к IP запросившего, поэтому
     /// кэш сверяется по отпечатку текущего прокси и пишется вместе с ним.
-    /// Дети группы блокируются на Process — это осознанно: за счёт структурной
-    /// конкурентности отмена задачи завершает проигравший процесс мгновенно.
-    public static func firstSuccess(videoID: String, proxy: String?) async throws -> (url: URL, viaProxy: Bool) {
-        let config = ProxyConfig.load()
+    /// Отмена группы (победил другой маршрут) завершает процесс проигравшего
+    /// мгновенно: флаг отмены пробрасывается в `runAsync`.
+    /// `allowSlowFallback == false` — только быстрый InnerTube-путь (префетч).
+    public static func firstSuccess(
+        videoID: String,
+        proxy: String?,
+        allowSlowFallback: Bool = true
+    ) async throws -> (url: URL, viaProxy: Bool) {
+        let config = ProxyConfig.current()
         let started = Date()
 
         if config.mode == .forced, proxy == nil {
@@ -284,7 +363,9 @@ public enum YTResolver {
                 if raceDirect {
                     group.addTask {
                         do {
-                            return .success((try await resolveRoute(videoID: videoID, proxy: nil), false))
+                            return .success((try await resolveRoute(
+                                videoID: videoID, proxy: nil, allowSlowFallback: allowSlowFallback
+                            ), false))
                         } catch {
                             return .failure(error)
                         }
@@ -293,7 +374,9 @@ public enum YTResolver {
                 if raceProxy, let proxy {
                     group.addTask {
                         do {
-                            return .success((try await resolveRoute(videoID: videoID, proxy: proxy), true))
+                            return .success((try await resolveRoute(
+                                videoID: videoID, proxy: proxy, allowSlowFallback: allowSlowFallback
+                            ), true))
                         } catch {
                             return .failure(error)
                         }
@@ -331,7 +414,7 @@ public enum YTResolver {
         }
     }
 
-    public static func importTracks(from raw: String, proxy: String? = nil, playlist: Bool? = nil) throws -> [Track] {
+    public static func importTracks(from raw: String, proxy: String? = nil, playlist: Bool? = nil) async throws -> [Track] {
         let argument = try sanitizedSource(raw)
         let isPlaylist = playlist ?? raw.contains("list=")
 
@@ -339,23 +422,37 @@ public enum YTResolver {
         // (1–2 запроса) вместо yt-dlp -J (веб-страница + API, ~15–25 с).
         // Плейлисты и live-трансляции идут полным путём через yt-dlp.
         if !isPlaylist, let videoID = InnertubeClient.extractVideoID(from: argument) {
-            if let track = InnertubeClient.metadataSync(for: videoID, proxy: proxy) {
+            if let track = try? await InnertubeClient.metadata(for: videoID, proxy: proxy) {
                 return [track]
             }
+            try Task.checkCancellation()
         }
 
+        let output = try await runAsync(
+            importArguments(argument: argument, isPlaylist: isPlaylist, viaProxy: proxy != nil),
+            timeout: 120,
+            proxy: proxy
+        )
+        return try parseImportOutput(output)
+    }
+
+    static func importArguments(argument: String, isPlaylist: Bool, viaProxy: Bool) -> [String] {
         var arguments: [String]
         if isPlaylist {
             arguments = ["-J", "--skip-download", "--flat-playlist", "--playlist-items", "1:50"]
         } else {
             arguments = ["-J", "--skip-download", "--no-playlist"]
         }
-        if proxy != nil {
+        if viaProxy {
             // Сам прокси передаётся через --config-locations (см. run), не в argv.
             arguments += ["--socket-timeout", "30", "--retries", "2"]
         }
         arguments += ["--", argument]
-        let output = try run(arguments, timeout: 120, proxy: proxy)
+        return arguments
+    }
+
+    /// Разбор `yt-dlp -J`: плейлист (flat) или одиночное видео. Чистая функция.
+    static func parseImportOutput(_ output: String) throws -> [Track] {
         guard let data = output.data(using: .utf8),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw ResolverError.nothingImported
@@ -387,7 +484,9 @@ public enum YTResolver {
         "youtu.be", "www.youtube-nocookie.com", "youtube-nocookie.com",
     ]
 
-    static func isVideoID(_ value: String) -> Bool {
+    /// 11-символьный ID видео YouTube. Единственная реализация на весь проект
+    /// (раньше дублировалась в InnertubeClient и AddLinkView).
+    public static func isVideoID(_ value: String) -> Bool {
         value.count == 11 && value.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
     }
 
@@ -411,20 +510,18 @@ public enum YTResolver {
     }
 }
 
-private final class DataBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored = Data()
+private final class DataBox: Sendable {
+    private let stored = Mutex(Data())
 
     var data: Data {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return stored
-        }
-        set {
-            lock.lock()
-            stored = newValue
-            lock.unlock()
-        }
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
     }
+}
+
+/// Флаг отмены для процесса, который ждётся вне Swift Concurrency.
+final class CancelFlag: Sendable {
+    private let state = Mutex(false)
+    var isSet: Bool { state.withLock { $0 } }
+    func set() { state.withLock { $0 = true } }
 }

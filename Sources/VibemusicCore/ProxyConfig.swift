@@ -80,7 +80,39 @@ public struct ProxyConfig: Equatable, Sendable {
         return config
     }
 
+    /// Кэш конфигурации стандартных defaults. `load()` читает связку ключей
+    /// и гоняет миграции, а плеер спрашивает конфиг на каждый трек и префетч:
+    /// держим значение в памяти, обновляем при `save()`.
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var cached: ProxyConfig?
+
+    /// Текущий конфиг из памяти (первое обращение читает Keychain один раз).
+    public static func current() -> ProxyConfig {
+        cacheLock.lock()
+        if let cached {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        let loaded = load()
+        cacheLock.lock()
+        if cached == nil { cached = loaded }
+        let result = cached ?? loaded
+        cacheLock.unlock()
+        return result
+    }
+
+    /// Сбрасывает кэш `current()`: следующий вызов перечитает хранилище.
+    public static func invalidateCache() {
+        cacheLock.lock()
+        cached = nil
+        cacheLock.unlock()
+    }
+
     public func save(defaults: UserDefaults = .standard, secrets: SecretStore? = nil) {
+        defer {
+            if defaults === UserDefaults.standard { Self.invalidateCache() }
+        }
         let store = Self.secretStore(for: defaults, override: secrets)
         defaults.set(enabled, forKey: Self.enabledKey)
         defaults.set(mode.rawValue, forKey: Self.modeKey)
