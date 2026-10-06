@@ -155,17 +155,20 @@ struct CategoryTile: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Активное состояние несут обводка и значок; фон плитки остаётся
+        // нейтральным стеклом — любой тинт фона на Liquid Glass читается
+        // как сплошной цветной квадрат.
         .liquidGlass(
             in: RoundedRectangle(cornerRadius: 22, style: .continuous),
-            tint: isActive ? tint.opacity(0.30) : nil,
+            tint: nil,
             interactive: true
         )
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(tint.opacity(isActive ? 0.85 : 0), lineWidth: 1.25)
+                .strokeBorder(tint.opacity(isActive ? 0.55 : 0), lineWidth: 1)
                 .allowsHitTesting(false)
         )
-        .shadow(color: tint.opacity(isActive ? 0.35 : 0), radius: 16, y: 4)
+        .shadow(color: tint.opacity(isActive ? 0.25 : 0), radius: 12, y: 3)
         .scaleEffect(isHovered && !isActive ? 1.03 : 1)
         .offset(y: isHovered && !isActive ? -2 : 0)
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isHovered)
@@ -421,6 +424,9 @@ struct GlassSlider: View {
     var range: ClosedRange<Double> = 0...1
     var tint: Color = .white
     var isEnabled: Bool = true
+    /// Лейбл для VoiceOver: у каждого слайдера свой («Позиция воспроизведения»,
+    /// «Громкость») — раньше был захардкожен один на всех.
+    var accessibilityLabel: String = "Позиция воспроизведения"
     /// Непрерывное обновление при перетаскивании.
     let onScrub: (Double) -> Void
     /// Фиксация значения (отпускание бегунка).
@@ -480,7 +486,7 @@ struct GlassSlider: View {
         }
         .frame(height: 18)
         .accessibilityElement()
-        .accessibilityLabel("Позиция воспроизведения")
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityValue("\(Int(displayValue))")
         .accessibilityAdjustableAction { direction in
             let span = range.upperBound - range.lowerBound

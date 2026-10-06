@@ -61,7 +61,6 @@ struct ContentView: View {
                     durationRow
                     categoriesGrid
                     todayFooter
-                    PlayerBar(player: player, controller: controller, volume: volumeBinding)
                 }
                 .padding(.horizontal, 34)
                 .padding(.top, 20)
@@ -69,8 +68,19 @@ struct ContentView: View {
                 .frame(maxWidth: 920)
                 .frame(maxWidth: .infinity)
             }
-            if let toast = player.statusText {
-                toastView(toast)
+            // Плеер прибит к низу окна: управление звуком доступно всегда,
+            // без прокрутки; тост всплывает над баром в той же вставке.
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 10) {
+                    if let toast = player.statusText {
+                        toastView(toast)
+                    }
+                    PlayerBar(player: player, controller: controller, volume: volumeBinding)
+                }
+                .padding(.horizontal, 34)
+                .padding(.bottom, 12)
+                .frame(maxWidth: 920)
+                .animation(.spring(response: 0.35, dampingFraction: 0.8), value: player.statusText)
             }
         }
         .frame(minWidth: 980, minHeight: 720)
@@ -148,10 +158,14 @@ struct ContentView: View {
 
     private var timerSection: some View {
         ZStack {
+            // Свечение: layout-рамка равна кольцу (300), визуальный размер
+            // набирается scaleEffect — иначе секция съедает 160pt вертикали
+            // и выталкивает сетку режимов за границу экрана.
             Circle()
-                .fill(RadialGradient(colors: [tint.opacity(0.14), .clear], center: .center, startRadius: 0, endRadius: 240))
-                .frame(width: 460, height: 460)
-                .blur(radius: 42)
+                .fill(RadialGradient(colors: [tint.opacity(0.14), .clear], center: .center, startRadius: 0, endRadius: 150))
+                .frame(width: 300, height: 300)
+                .blur(radius: 27)
+                .scaleEffect(1.55)
                 .drawingGroup()
                 .allowsHitTesting(false)
             TimerRing(
@@ -244,6 +258,8 @@ struct ContentView: View {
                         .font(.system(size: 10, weight: .semibold))
                     Text(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? "ещё" : Theme.shortDuration(controller.sessionMinutes))
                         .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
                 }
                 .foregroundStyle(AppDefaults.presetDurations.contains(controller.sessionMinutes) ? .white.opacity(0.55) : tint)
                 .padding(.horizontal, 12)
@@ -315,20 +331,16 @@ struct ContentView: View {
     }
 
     private func toastView(_ message: String) -> some View {
-        VStack {
-            Spacer()
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.yellow.opacity(0.9))
-                Text(message)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .liquidGlass(in: Capsule())
-            .padding(.bottom, 12)
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow.opacity(0.9))
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .liquidGlass(in: Capsule())
         .id(message)
         .task(id: message) {
             do {
@@ -340,7 +352,6 @@ struct ContentView: View {
             guard player.statusText == message else { return }
             player.statusText = nil
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: player.statusText)
         .allowsHitTesting(false)
     }
 
@@ -426,10 +437,10 @@ struct PlayerBar: View {
                 systemName: player.isPlaying ? "pause.fill" : "play.fill",
                 size: 46,
                 tint: Theme.color(for: controller.selectedCategoryID ?? "work").opacity(0.4)
-            ) { controller.toggleSession() }
-                .help("Пауза сессии (Space)")
-                .accessibilityLabel(player.isPlaying ? "Приостановить сессию" : "Запустить сессию")
-                .accessibilityHint("Ставит сессию на паузу и возвращает к работе; работает и клавиша пробел")
+            ) { player.toggle() }
+                .help("Пауза/продолжить музыку — таймер сессии продолжит идти")
+                .accessibilityLabel(player.isPlaying ? "Пауза воспроизведения" : "Возобновить воспроизведение")
+                .accessibilityHint("Ставит на паузу только звук; сессионный таймер продолжает отсчёт")
             PlayerButton(systemName: "forward.fill", size: 36) { player.next() }
                 .help("Следующий трек")
                 .accessibilityLabel("Следующий трек")
@@ -511,10 +522,10 @@ struct PlayerBar: View {
                     value: volume,
                     range: 0...1,
                     tint: .white.opacity(0.7),
+                    accessibilityLabel: "Громкость",
                     onScrub: { controller.setVolume(Float($0)) }
                 )
                 .frame(width: 92)
-                .accessibilityLabel("Громкость")
                 .accessibilityHint("Регулирует громкость воспроизведения")
             }
         }

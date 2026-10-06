@@ -16,6 +16,7 @@ struct SettingsView: View {
                 .tabItem { Label("Статистика", systemImage: "chart.bar") }
         }
         .frame(width: 520, height: 430)
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -48,7 +49,7 @@ struct GeneralSettingsTab: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                 Picker("Режим", selection: proxyModeBinding) {
-                    Text("Авто (гонка)").tag(ProxyConfig.Mode.auto.rawValue)
+                    Text("Авто").tag(ProxyConfig.Mode.auto.rawValue)
                     Text("Только прокси").tag(ProxyConfig.Mode.forced.rawValue)
                     Text("Без прокси").tag(ProxyConfig.Mode.direct.rawValue)
                 }
@@ -232,7 +233,7 @@ struct StatsSettingsTab: View {
         let days = stats.lastDays(7)
         let maxMinutes = max(days.map(\.minutes).max() ?? 0, 1)
         let formatter = DateFormatter()
-        formatter.dateFormat = "EEEEE"
+            formatter.dateFormat = "E"
         return VStack(alignment: .leading, spacing: 8) {
             Text("Последние 7 дней")
                 .font(.headline)
